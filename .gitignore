@@ -6,6 +6,8 @@
 *.ko
 *.obj
 *.elf
+*.img
+*.cfg
 
 # Linker output
 *.ilk
