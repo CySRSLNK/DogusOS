@@ -19,7 +19,7 @@ LDFLAGS := -T linker.ld -nostdlib -z noexecstack
 
 # QEMU 参数
 QEMU := qemu-system-x86_64
-QEMU_FLAGS := -m 512M -display gtk -device VGA,edid=on,xres=640,yres=400 -drive file=$(IMG_NAME),format=raw
+QEMU_FLAGS := -m 512M -display gtk -device VGA,edid=on,xres=1280,yres=800 -drive file=$(IMG_NAME),format=raw
 
 .PHONY: all run clean debug
 
@@ -29,8 +29,10 @@ all:
 	$(CC) $(CFLAGS) -c kernel.c -o kernel.o
 	$(CC) $(CFLAGS) -c shell.c -o shell.o
 	$(CC) $(CFLAGS) -c commands.c -o commands.o
-	$(LD) $(LDFLAGS) boot.o kernel.o shell.o commands.o -o kernel.elf
-	@echo 'set gfxmode=640x400' > grub.cfg
+	$(CC) $(CFLAGS) -c disk.c -o disk.o
+	$(CC) $(CFLAGS) -c ext2.c -o ext2.o
+	$(LD) $(LDFLAGS) boot.o kernel.o shell.o commands.o disk.o ext2.o -o kernel.elf
+	@echo 'set gfxmode=1280x800' > grub.cfg
 	@echo 'set timeout=0' >> grub.cfg
 	@echo 'set timeout_style=hidden' >> grub.cfg
 	@echo 'set default=0' >> grub.cfg
@@ -76,6 +78,6 @@ clean:
 	@for loop in $$(losetup -a | awk -F: '/$(IMG_NAME)/ {print $$1}'); do \
 		sudo losetup -d $$loop 2>/dev/null || true; \
 	done
-	@rm -f boot.o kernel.o shell.o commands.o kernel.elf grub.cfg
+	@rm -f boot.o kernel.o shell.o commands.o disk.o ext2.o kernel.elf grub.cfg
 	@rm -rf tmp_mnt
 	@echo "清理完成，保留源文件与 $(IMG_NAME)"

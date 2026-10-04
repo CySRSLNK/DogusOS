@@ -4,6 +4,7 @@
 #include "shell.h"
 #include "commands.h"
 #include "font.h"
+#include "ext2.h"
 
 // 字符到 font8x16 下标的映射表，顺序为小写、大写、数字、标点
 static const char char_map[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ,./;'[]\\`-=<>?:\"{}|~!@#$%^&*()_+";
@@ -873,6 +874,8 @@ void kernel_main(uint64_t mb2_info_addr) {
 	idt_init();
 	pic_init();
 	pit_init();
+	disk_init();
+	ext2_init();
 
 	__asm__ volatile ("sti");
 
@@ -918,6 +921,8 @@ void kernel_main(uint64_t mb2_info_addr) {
 
 	print_timestamp();
 	print("PIT initialized at 1000Hz\n");
+	print_timestamp();
+	ext2_print_info();
 	delay_ms(100);
 
 	print_timestamp();

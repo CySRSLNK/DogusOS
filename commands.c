@@ -2,18 +2,21 @@
 #include "kernel.h"
 #include "shell.h"
 #include "commands.h"
+#include "ext2.h"
 #include "strings.h"
 
 int check_permission(int need, int cur);
 int check_argc(int min, int max, int cur);
 
 struct cmd commands[] = {
+	{"cd", cmd_cd, str_cmd_cd_summary, str_cmd_cd_detail},
 	{"clear", cmd_clear, str_cmd_clear_summary, str_cmd_clear_detail},
 	{"echo", cmd_echo, str_cmd_echo_summary, str_cmd_echo_detail},
 	{"false", cmd_false, str_cmd_false_summary, str_cmd_false_detail},
 	{"help", cmd_help, str_cmd_help_summary, str_cmd_help_detail},
 	{"history", cmd_history, str_cmd_history_summary, str_cmd_history_detail},
 	{"hostname", cmd_hostname, str_cmd_hostname_summary, str_cmd_hostname_detail},
+	{"ls", cmd_ls, str_cmd_ls_summary, str_cmd_ls_detail},
 	{"reboot", cmd_reboot, str_cmd_reboot_summary, str_cmd_reboot_detail},
 	{"true", cmd_true, str_cmd_true_summary, str_cmd_true_detail},
 	{"uptime", cmd_uptime, str_cmd_uptime_summary, str_cmd_uptime_detail},
@@ -21,6 +24,74 @@ struct cmd commands[] = {
 };
 
 int command_count = sizeof(commands) / sizeof(commands[0]);
+
+int cmd_cd(int argc, char **argv, int privilege) {
+	if (check_permission(0, privilege)) {
+		if (check_argc(0, 1, argc)) {
+			const char *target;
+			char joined[256];
+			char norm[256];
+
+			if (argc == 0) {
+				target = "/";
+			} else if (argv[0][0] == '/') {
+				target = argv[0];
+			} else {
+				int w = 0;
+
+				for (int i = 0; cwd[i] != '\0' && w < 255; i++) {
+					joined[w++] = cwd[i];
+				}
+
+				if (w > 0 && joined[w - 1] != '/') {
+					joined[w++] = '/';
+				}
+
+				for (int i = 0; argv[0][i] != '\0' && w < 255; i++) {
+					joined[w++] = argv[0][i];
+				}
+
+				joined[w] = '\0';
+				target = joined;
+			}
+
+			path_normalize(target, norm, 256);
+
+			uint32_t ino;
+
+			if (ext2_lookup(norm, &ino) != 0) {
+				print(str_cd_noent);
+				print(norm);
+				print_char('\n');
+				return 1;
+			}
+
+			struct ext2_inode inode;
+			ext2_read_inode(ino, &inode);
+
+			if ((inode.i_mode & 0xF000) != 0x4000) {
+				print(str_cd_notdir);
+				print(norm);
+				print_char('\n');
+				return 1;
+			}
+
+			for (int i = 0; i < 256; i++) {
+				cwd[i] = norm[i];
+				path_buf[i] = norm[i];
+
+				if (norm[i] == '\0') {
+					break;
+				}
+			}
+
+			build_prompt();
+			return 0;
+		}
+	}
+
+	return 1;
+}
 
 int cmd_clear(int argc, char **argv, int privilege) {
 	(void)argv;
@@ -88,7 +159,7 @@ int cmd_help(int argc, char **argv, int privilege) {
 					}
 				}
 
-				print_cmd_not_found(str_src_help, argv[0]);
+				print_cmd_not_found("help", argv[0]);
 				return 1;
 			}
 
@@ -126,6 +197,69 @@ int cmd_hostname(int argc, char **argv, int privilege) {
 		if (check_argc(0, 0, argc)) {
 			print(host);
 			print_char('\n');
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+int cmd_ls(int argc, char **argv, int privilege) {
+	if (check_permission(0, privilege)) {
+		if (check_argc(0, 1, argc)) {
+			char joined[256];
+			char norm[256];
+			const char *target;
+			const char *display;
+
+			if (argc == 0) {
+				target = cwd;
+				display = ".";
+			} else if (argv[0][0] == '/') {
+				target = argv[0];
+				display = argv[0];
+			} else {
+				int w = 0;
+
+				for (int i = 0; cwd[i] != '\0' && w < 255; i++) {
+					joined[w++] = cwd[i];
+				}
+
+				if (w > 0 && joined[w - 1] != '/') {
+					joined[w++] = '/';
+				}
+
+				for (int i = 0; argv[0][i] != '\0' && w < 255; i++) {
+					joined[w++] = argv[0][i];
+				}
+
+				joined[w] = '\0';
+				target = joined;
+				display = argv[0];
+			}
+
+			path_normalize(target, norm, 256);
+
+			uint32_t ino;
+
+			if (ext2_lookup(norm, &ino) != 0) {
+				print(str_ls_noent);
+				print(display);
+				print_char('\n');
+				return 1;
+			}
+
+			struct ext2_inode inode;
+			ext2_read_inode(ino, &inode);
+
+			if ((inode.i_mode & 0xF000) != 0x4000) {
+				print(str_ls_notdir);
+				print(display);
+				print_char('\n');
+				return 1;
+			}
+
+			ext2_ls(norm);
 			return 0;
 		}
 	}

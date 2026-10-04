@@ -24,7 +24,8 @@ int line_old_len = 0;
 
 const char *user = "user";
 const char *host = "host";
-const char *path = "~";
+char cwd[256] = "/";
+char path_buf[256] = "/";
 
 char prompt_buf[128] = { 0 };
 
@@ -37,6 +38,76 @@ int current_privilege = 0;
 int last_exit_code = 0;
 
 #define ARGV_MAX	(LINE_BUF_SIZE / 2 + 1)
+
+// 归一化路径，以 / 开头，不以 / 结尾（根目录除外）
+void path_normalize(const char *in, char *out, int out_size) {
+	char *stack[64];
+	int depth = 0;
+	char buf[256];
+	int n = 0;
+
+	while (*in != '\0' && n < 255) {
+		buf[n++] = *in++;
+	}
+	buf[n] = '\0';
+
+	char *p = buf;
+
+	while (*p != '\0') {
+		while (*p == '/') {
+			p++;
+		}
+
+		if (*p == '\0') {
+			break;
+		}
+
+		char *start = p;
+
+		while (*p != '\0' && *p != '/') {
+			p++;
+		}
+
+		if (*p == '/') {
+			*p = '\0';
+			p++;
+		}
+
+		if (strcmp(start, ".") == 0) {
+			// 跳过
+		} else if (strcmp(start, "..") == 0) {
+			if (depth > 0) {
+				depth--;
+			}
+		} else {
+			if (depth < 64) {
+				stack[depth++] = start;
+			}
+		}
+	}
+
+	int w = 0;
+
+	if (depth == 0) {
+		if (w < out_size - 1) {
+			out[w++] = '/';
+		}
+	} else {
+		for (int i = 0; i < depth; i++) {
+			if (w < out_size - 1) {
+				out[w++] = '/';
+			}
+
+			char *s = stack[i];
+
+			while (*s != '\0' && w < out_size - 1) {
+				out[w++] = *s++;
+			}
+		}
+	}
+
+	out[w] = '\0';
+}
 
 void build_prompt(void) {
 	int i = 0;
@@ -57,8 +128,8 @@ void build_prompt(void) {
 	prompt_buf[i++] = ':';
 
 	j = 0;
-	while (path[j] != '\0') {
-		prompt_buf[i++] = path[j];
+	while (path_buf[j] != '\0' && i < 127) {
+		prompt_buf[i++] = path_buf[j];
 		j++;
 	}
 

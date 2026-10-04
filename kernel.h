@@ -52,6 +52,12 @@ void delay_ms(uint32_t ms);
 
 char get_key(void);
 
+void disk_init(void);
+int disk_read_sectors(uint32_t lba, uint8_t count, void *buf);
+void ext2_init(void);
+void ext2_print_info(void);
+void ext2_ls_root(void);
+
 int strcmp(const char *a, const char *b);
 
 #endif
