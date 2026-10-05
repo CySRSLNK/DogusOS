@@ -2,6 +2,7 @@
 #include "kernel.h"
 #include "shell.h"
 #include "commands.h"
+#include "ext2.h"
 #include "strings.h"
 
 #define LINE_BUF_SIZE	256
@@ -24,6 +25,7 @@ int line_old_len = 0;
 
 const char *user = "user";
 const char *host = "host";
+
 char cwd[256] = "/";
 char path_buf[256] = "/";
 
@@ -37,7 +39,44 @@ char hist_saved[LINE_BUF_SIZE];
 int current_privilege = 0;
 int last_exit_code = 0;
 
-#define ARGV_MAX	(LINE_BUF_SIZE / 2 + 1)
+#define ARGV_MAX 512
+#define GLOB_TOKEN_SIZE 256
+
+void build_prompt(void) {
+	int i = 0;
+
+	while (user[i] != '\0' && i < 127) {
+		prompt_buf[i] = user[i];
+		i++;
+	}
+
+	if (i < 127) {
+		prompt_buf[i++] = '@';
+	}
+
+	int j = 0;
+	while (host[j] != '\0' && i < 127) {
+		prompt_buf[i++] = host[j];
+		j++;
+	}
+
+	if (i < 127) {
+		prompt_buf[i++] = ':';
+	}
+
+	j = 0;
+	while (path_buf[j] != '\0' && i < 127) {
+		prompt_buf[i++] = path_buf[j];
+		j++;
+	}
+
+	if (i < 126) {
+		prompt_buf[i++] = '$';
+		prompt_buf[i++] = ' ';
+	}
+
+	prompt_buf[i] = '\0';
+}
 
 // 归一化路径，以 / 开头，不以 / 结尾（根目录除外）
 void path_normalize(const char *in, char *out, int out_size) {
@@ -109,35 +148,6 @@ void path_normalize(const char *in, char *out, int out_size) {
 	out[w] = '\0';
 }
 
-void build_prompt(void) {
-	int i = 0;
-
-	while (user[i] != '\0') {
-		prompt_buf[i] = user[i];
-		i++;
-	}
-
-	prompt_buf[i++] = '@';
-
-	int j = 0;
-	while (host[j] != '\0') {
-		prompt_buf[i++] = host[j];
-		j++;
-	}
-
-	prompt_buf[i++] = ':';
-
-	j = 0;
-	while (path_buf[j] != '\0' && i < 127) {
-		prompt_buf[i++] = path_buf[j];
-		j++;
-	}
-
-	prompt_buf[i++] = '$';
-	prompt_buf[i++] = ' ';
-	prompt_buf[i] = '\0';
-}
-
 void hist_load(int idx) {
 	int i = 0;
 
@@ -149,6 +159,15 @@ void hist_load(int idx) {
 	line_buf[i] = '\0';
 	line_len = i;
 	line_cursor = i;
+}
+
+// 在历史位置编辑后，把编辑结果覆盖到 saved，pos 回最新
+static void hist_edit_to_saved(void) {
+	hist_pos = hist_count;
+
+	for (int i = 0; i <= line_len; i++) {
+		hist_saved[i] = line_buf[i];
+	}
 }
 
 void redraw_line(void) {
@@ -229,30 +248,45 @@ void redraw_line(void) {
 	cursor_unlock();
 }
 
-int check_permission(int need, int cur) {
+// 输出报错，格式为 来源: 报错信息[: 具体内容]
+void print_error(const char *source, const char *msg, const char *detail) {
+	print(source);
+	print(": ");
+	print(msg);
+
+	if (detail != 0 && detail[0] != '\0') {
+		print(": ");
+		print(detail);
+	}
+
+	print_char('\n');
+}
+
+int check_permission(const char *source, int need, int cur) {
 	if (cur >= need) {
 		return 1;
 	}
 
-	print(str_src_dogus);
-	print(str_err_permission_denied);
+	print_error(source, str_msg_permission, 0);
 	return 0;
 }
 
-int check_argc(int min, int max, int cur) {
+int check_argc(const char *source, int min, int max, int cur) {
 	if (cur < min) {
-		print(str_src_dogus);
-		print(str_err_too_few_args);
+		print_error(source, str_msg_too_few, 0);
 		return 0;
 	}
 
 	if (max != -1 && cur > max) {
-		print(str_src_dogus);
-		print(str_err_too_many_args);
+		print_error(source, str_msg_too_many, 0);
 		return 0;
 	}
 
 	return 1;
+}
+
+void print_cmd_not_found(const char *source, const char *cmd) {
+	print_error(source, str_msg_cmd_not_found, cmd);
 }
 
 static int split_tokens(char *line, char **argv) {
@@ -420,29 +454,202 @@ static int split_tokens(char *line, char **argv) {
 	return argc;
 }
 
-void print_cmd_not_found(const char *source, const char *cmd) {
-	print(source);
-	print(str_fmt_cmd_mid);
-	print(cmd);
-	print_char('\n');
+static char glob_buf[ARGV_MAX][GLOB_TOKEN_SIZE];
+static char glob_names[256][256];
+
+static int wildcard_match(const char *pat, const char *str) {
+	while (*pat != '\0') {
+		if (*pat == '*') {
+			while (*pat == '*') {
+				pat++;
+			}
+
+			if (*pat == '\0') {
+				return 1;
+			}
+
+			while (*str != '\0') {
+				if (wildcard_match(pat, str)) {
+					return 1;
+				}
+
+				str++;
+			}
+
+			return wildcard_match(pat, str);
+		}
+
+		if (*str == '\0') {
+			return 0;
+		}
+
+		if (*pat != *str) {
+			return 0;
+		}
+
+		pat++;
+		str++;
+	}
+
+	return *str == '\0';
+}
+
+static int expand_glob(int argc, char **argv, char **new_argv) {
+	int new_argc = 0;
+
+	for (int i = 0; i < argc; i++) {
+		const char *tok = argv[i];
+
+		int has_star = 0;
+		for (int j = 0; tok[j] != '\0'; j++) {
+			if (tok[j] == '*') {
+				has_star = 1;
+				break;
+			}
+		}
+
+		if (!has_star) {
+			if (new_argc >= ARGV_MAX) {
+				break;
+			}
+
+			int n = 0;
+			while (tok[n] != '\0' && n < GLOB_TOKEN_SIZE - 1) {
+				glob_buf[new_argc][n] = tok[n];
+				n++;
+			}
+			glob_buf[new_argc][n] = '\0';
+			new_argv[new_argc] = glob_buf[new_argc];
+			new_argc++;
+			continue;
+		}
+
+		int last_slash = -1;
+		for (int j = 0; tok[j] != '\0'; j++) {
+			if (tok[j] == '/') {
+				last_slash = j;
+			}
+		}
+
+		char dir[256];
+		const char *pattern;
+
+		if (last_slash < 0) {
+			int w = 0;
+			while (cwd[w] != '\0' && w < 250) {
+				dir[w] = cwd[w];
+				w++;
+			}
+			if (w > 0 && dir[w - 1] != '/') {
+				dir[w++] = '/';
+			}
+			dir[w] = '\0';
+			pattern = tok;
+		} else if (tok[0] == '/') {
+			for (int j = 0; j <= last_slash; j++) {
+				dir[j] = tok[j];
+			}
+			dir[last_slash + 1] = '\0';
+			pattern = tok + last_slash + 1;
+		} else {
+			int w = 0;
+			while (cwd[w] != '\0' && w < 250) {
+				dir[w] = cwd[w];
+				w++;
+			}
+			if (w > 0 && dir[w - 1] != '/') {
+				dir[w++] = '/';
+			}
+			for (int j = 0; j <= last_slash && w < 254; j++) {
+				dir[w++] = tok[j];
+			}
+			dir[w] = '\0';
+			pattern = tok + last_slash + 1;
+		}
+
+		uint32_t dir_ino;
+
+		if (ext2_lookup(dir, &dir_ino) != 0) {
+			if (new_argc >= ARGV_MAX) {
+				break;
+			}
+
+			int n = 0;
+			while (tok[n] != '\0' && n < GLOB_TOKEN_SIZE - 1) {
+				glob_buf[new_argc][n] = tok[n];
+				n++;
+			}
+			glob_buf[new_argc][n] = '\0';
+			new_argv[new_argc] = glob_buf[new_argc];
+			new_argc++;
+			continue;
+		}
+
+		int before = new_argc;
+		int n = ext2_list_names(dir_ino, glob_names, 256);
+
+		for (int k = 0; k < n; k++) {
+			if (!wildcard_match(pattern, glob_names[k])) {
+				continue;
+			}
+
+			if (new_argc >= ARGV_MAX) {
+				break;
+			}
+
+			int w = 0;
+			for (int j = 0; dir[j] != '\0' && w < GLOB_TOKEN_SIZE - 1; j++) {
+				glob_buf[new_argc][w] = dir[j];
+				w++;
+			}
+			for (int j = 0; glob_names[k][j] != '\0' && w < GLOB_TOKEN_SIZE - 1; j++) {
+				glob_buf[new_argc][w] = glob_names[k][j];
+				w++;
+			}
+			glob_buf[new_argc][w] = '\0';
+			new_argv[new_argc] = glob_buf[new_argc];
+			new_argc++;
+		}
+
+		if (new_argc == before) {
+			if (new_argc >= ARGV_MAX) {
+				break;
+			}
+
+			int m = 0;
+			while (tok[m] != '\0' && m < GLOB_TOKEN_SIZE - 1) {
+				glob_buf[new_argc][m] = tok[m];
+				m++;
+			}
+			glob_buf[new_argc][m] = '\0';
+			new_argv[new_argc] = glob_buf[new_argc];
+			new_argc++;
+		}
+	}
+
+	new_argv[new_argc] = 0;
+	return new_argc;
 }
 
 void handle_command(char *line) {
-	char *argv[ARGV_MAX];
+	static char *argv[ARGV_MAX];
+	static char *expanded_argv[ARGV_MAX];
 	int argc = split_tokens(line, argv);
 
 	if (argc == 0) {
 		return;
 	}
 
+	int eargc = expand_glob(argc, argv, expanded_argv);
+
 	for (int i = 0; i < command_count; i++) {
-		if (strcmp(argv[0], commands[i].name) == 0) {
-			last_exit_code = commands[i].func(argc - 1, argv + 1, current_privilege);
+		if (strcmp(expanded_argv[0], commands[i].name) == 0) {
+			last_exit_code = commands[i].func(eargc - 1, expanded_argv + 1, current_privilege);
 			return;
 		}
 	}
 
-	print_cmd_not_found(str_src_dogus, argv[0]);
+	print_cmd_not_found("dogus", expanded_argv[0]);
 	last_exit_code = 127;
 }
 
@@ -579,9 +786,7 @@ void shell_run(void) {
 				line_buf[line_len] = '\0';
 
 				if (hist_pos != hist_count) {
-					for (int i = 0; i <= line_len; i++) {
-						hist[hist_pos][i] = line_buf[i];
-					}
+					hist_edit_to_saved();
 				}
 
 				redraw_line();
@@ -596,9 +801,7 @@ void shell_run(void) {
 				line_buf[line_len] = '\0';
 
 				if (hist_pos != hist_count) {
-					for (int i = 0; i <= line_len; i++) {
-						hist[hist_pos][i] = line_buf[i];
-					}
+					hist_edit_to_saved();
 				}
 
 				redraw_line();
@@ -664,9 +867,7 @@ void shell_run(void) {
 				line_buf[line_len] = '\0';
 
 				if (hist_pos != hist_count) {
-					for (int i = 0; i <= line_len; i++) {
-						hist[hist_pos][i] = line_buf[i];
-					}
+					hist_edit_to_saved();
 				}
 
 				redraw_line();

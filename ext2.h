@@ -28,7 +28,17 @@ void ext2_init(void);
 void ext2_print_info(void);
 void ext2_ls_root(void);
 int ext2_lookup(const char *path, uint32_t *ino);
-void ext2_ls(const char *path);
+void ext2_ls(const char *path, int show_hidden, int show_inode, int show_long);
+void ext2_tree(const char *path, int show_hidden);
 int ext2_read_inode(uint32_t ino, struct ext2_inode *out);
+int ext2_list_names(uint32_t ino, char names[][256], int max);
+int ext2_write_inode(uint32_t ino, const struct ext2_inode *in);
+int ext2_alloc_inode(void);
+int ext2_alloc_block(void);
+int ext2_add_dir_entry(uint32_t dir_ino, uint32_t child_ino, const char *name, uint8_t type);
+int ext2_mkdir(const char *path);
+int ext2_remove(const char *path, int recursive);
+int ext2_rmdir(const char *path);
+int ext2_cat(const char *path);
 
 #endif

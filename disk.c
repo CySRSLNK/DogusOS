@@ -68,3 +68,33 @@ int disk_read_sectors(uint32_t lba, uint8_t count, void *buf) {
 
 	return 0;
 }
+
+int disk_write_sectors(uint32_t lba, uint8_t count, const void *buf) {
+	if (count == 0) {
+		return 0;
+	}
+
+	ata_wait_bsy();
+
+	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)(0xE0 | ((lba >> 24) & 0x0F))), "d"((uint16_t)ATA_DRIVE));
+	__asm__ volatile ("outb %%al, %%dx" : : "a"(count), "d"((uint16_t)ATA_SECCOUNT));
+	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)(lba & 0xFF)), "d"((uint16_t)ATA_LBA_LOW));
+	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)((lba >> 8) & 0xFF)), "d"((uint16_t)ATA_LBA_MID));
+	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)((lba >> 16) & 0xFF)), "d"((uint16_t)ATA_LBA_HIGH));
+	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)0x30), "d"((uint16_t)ATA_COMMAND));
+
+	const uint16_t *ptr = (const uint16_t *)buf;
+
+	for (int s = 0; s < count; s++) {
+		ata_wait_ready();
+
+		for (int i = 0; i < 256; i++) {
+			__asm__ volatile ("outw %%ax, %%dx" : : "a"(ptr[s * 256 + i]), "d"((uint16_t)ATA_DATA));
+		}
+	}
+
+	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)0xE7), "d"((uint16_t)ATA_COMMAND));
+	ata_wait_bsy();
+
+	return 0;
+}

@@ -5,10 +5,11 @@
 #include "ext2.h"
 #include "strings.h"
 
-int check_permission(int need, int cur);
-int check_argc(int min, int max, int cur);
+int check_permission(const char *source, int need, int cur);
+int check_argc(const char *source, int min, int max, int cur);
 
 struct cmd commands[] = {
+	{"cat", cmd_cat, str_cmd_cat_summary, str_cmd_cat_detail},
 	{"cd", cmd_cd, str_cmd_cd_summary, str_cmd_cd_detail},
 	{"clear", cmd_clear, str_cmd_clear_summary, str_cmd_clear_detail},
 	{"echo", cmd_echo, str_cmd_echo_summary, str_cmd_echo_detail},
@@ -17,7 +18,15 @@ struct cmd commands[] = {
 	{"history", cmd_history, str_cmd_history_summary, str_cmd_history_detail},
 	{"hostname", cmd_hostname, str_cmd_hostname_summary, str_cmd_hostname_detail},
 	{"ls", cmd_ls, str_cmd_ls_summary, str_cmd_ls_detail},
+	{"mkdir", cmd_mkdir, str_cmd_mkdir_summary, str_cmd_mkdir_detail},
+	{"pwd", cmd_pwd, str_cmd_pwd_summary, str_cmd_pwd_detail},
 	{"reboot", cmd_reboot, str_cmd_reboot_summary, str_cmd_reboot_detail},
+	{"rm", cmd_rm, str_cmd_rm_summary, str_cmd_rm_detail},
+	{"rmdir", cmd_rmdir, str_cmd_rmdir_summary, str_cmd_rmdir_detail},
+	{"stat", cmd_stat, str_cmd_stat_summary, str_cmd_stat_detail},
+	{"sudo", cmd_sudo, str_cmd_sudo_summary, str_cmd_sudo_detail},
+	{"touch", cmd_touch, str_cmd_touch_summary, str_cmd_touch_detail},
+	{"tree", cmd_tree, str_cmd_tree_summary, str_cmd_tree_detail},
 	{"true", cmd_true, str_cmd_true_summary, str_cmd_true_detail},
 	{"uptime", cmd_uptime, str_cmd_uptime_summary, str_cmd_uptime_detail},
 	{"whoami", cmd_whoami, str_cmd_whoami_summary, str_cmd_whoami_detail},
@@ -25,17 +34,71 @@ struct cmd commands[] = {
 
 int command_count = sizeof(commands) / sizeof(commands[0]);
 
+int cmd_cat(int argc, char **argv, int privilege) {
+	if (check_permission("cat", 0, privilege)) {
+		if (check_argc("cat", 1, -1, argc)) {
+			int ret = 0;
+
+			for (int i = 0; i < argc; i++) {
+				char joined[256];
+				char norm[256];
+				const char *target;
+
+				if (argv[i][0] == '/') {
+					target = argv[i];
+				} else {
+					int w = 0;
+
+					for (int j = 0; cwd[j] != '\0' && w < 255; j++) {
+						joined[w++] = cwd[j];
+					}
+
+					if (w > 0 && joined[w - 1] != '/') {
+						joined[w++] = '/';
+					}
+
+					for (int j = 0; argv[i][j] != '\0' && w < 255; j++) {
+						joined[w++] = argv[i][j];
+					}
+
+					joined[w] = '\0';
+					target = joined;
+				}
+
+				path_normalize(target, norm, 256);
+
+				int r = ext2_cat(norm);
+
+				if (r == -1) {
+					print_error("cat", str_msg_noent, argv[i]);
+					ret = 1;
+				} else if (r == -2) {
+					print_error("cat", str_msg_isdir, argv[i]);
+					ret = 1;
+				}
+			}
+
+			return ret;
+		}
+	}
+
+	return 1;
+}
+
 int cmd_cd(int argc, char **argv, int privilege) {
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, 1, argc)) {
+	if (check_permission("cd", 0, privilege)) {
+		if (check_argc("cd", 0, 1, argc)) {
 			const char *target;
+			const char *display;
 			char joined[256];
 			char norm[256];
 
 			if (argc == 0) {
 				target = "/";
+				display = "/";
 			} else if (argv[0][0] == '/') {
 				target = argv[0];
+				display = argv[0];
 			} else {
 				int w = 0;
 
@@ -53,6 +116,7 @@ int cmd_cd(int argc, char **argv, int privilege) {
 
 				joined[w] = '\0';
 				target = joined;
+				display = argv[0];
 			}
 
 			path_normalize(target, norm, 256);
@@ -60,9 +124,7 @@ int cmd_cd(int argc, char **argv, int privilege) {
 			uint32_t ino;
 
 			if (ext2_lookup(norm, &ino) != 0) {
-				print(str_cd_noent);
-				print(norm);
-				print_char('\n');
+				print_error("cd", str_msg_noent, display);
 				return 1;
 			}
 
@@ -70,9 +132,7 @@ int cmd_cd(int argc, char **argv, int privilege) {
 			ext2_read_inode(ino, &inode);
 
 			if ((inode.i_mode & 0xF000) != 0x4000) {
-				print(str_cd_notdir);
-				print(norm);
-				print_char('\n');
+				print_error("cd", str_msg_notdir, display);
 				return 1;
 			}
 
@@ -96,8 +156,8 @@ int cmd_cd(int argc, char **argv, int privilege) {
 int cmd_clear(int argc, char **argv, int privilege) {
 	(void)argv;
 
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, 0, argc)) {
+	if (check_permission("clear", 0, privilege)) {
+		if (check_argc("clear", 0, 0, argc)) {
 			clear_screen();
 			cursor_goto(0, 0);
 			return 0;
@@ -108,8 +168,8 @@ int cmd_clear(int argc, char **argv, int privilege) {
 }
 
 int cmd_echo(int argc, char **argv, int privilege) {
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, -1, argc)) {
+	if (check_permission("echo", 0, privilege)) {
+		if (check_argc("echo", 0, -1, argc)) {
 			for (int i = 0; i < argc; i++) {
 				if (i > 0) {
 					print_char(' ');
@@ -129,8 +189,8 @@ int cmd_echo(int argc, char **argv, int privilege) {
 int cmd_false(int argc, char **argv, int privilege) {
 	(void)argv;
 
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, 0, argc)) {
+	if (check_permission("false", 0, privilege)) {
+		if (check_argc("false", 0, 0, argc)) {
 			return 1;
 		}
 	}
@@ -139,8 +199,8 @@ int cmd_false(int argc, char **argv, int privilege) {
 }
 
 int cmd_help(int argc, char **argv, int privilege) {
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, 1, argc)) {
+	if (check_permission("help", 0, privilege)) {
+		if (check_argc("help", 0, 1, argc)) {
 			if (argc == 0) {
 				for (int i = 0; i < command_count; i++) {
 					print(commands[i].name);
@@ -173,8 +233,8 @@ int cmd_help(int argc, char **argv, int privilege) {
 int cmd_history(int argc, char **argv, int privilege) {
 	(void)argv;
 
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, 0, argc)) {
+	if (check_permission("history", 0, privilege)) {
+		if (check_argc("history", 0, 0, argc)) {
 			for (int i = 0; i < hist_count; i++) {
 				print(" ");
 				print_uint((uint32_t)(i + 1));
@@ -193,8 +253,8 @@ int cmd_history(int argc, char **argv, int privilege) {
 int cmd_hostname(int argc, char **argv, int privilege) {
 	(void)argv;
 
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, 0, argc)) {
+	if (check_permission("hostname", 0, privilege)) {
+		if (check_argc("hostname", 0, 0, argc)) {
 			print(host);
 			print_char('\n');
 			return 0;
@@ -205,8 +265,554 @@ int cmd_hostname(int argc, char **argv, int privilege) {
 }
 
 int cmd_ls(int argc, char **argv, int privilege) {
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, 1, argc)) {
+	if (check_permission("ls", 0, privilege)) {
+		if (check_argc("ls", 0, 4, argc)) {
+			int show_hidden = 0;
+			int show_inode = 0;
+			int show_long = 0;
+			const char *path = 0;
+			int path_count = 0;
+
+			for (int i = 0; i < argc; i++) {
+				if (argv[i][0] == '-' && argv[i][1] != '\0') {
+					for (int j = 1; argv[i][j] != '\0'; j++) {
+						if (argv[i][j] == 'a' || argv[i][j] == 'A') {
+							show_hidden = 1;
+						} else if (argv[i][j] == 'i' || argv[i][j] == 'I') {
+							show_inode = 1;
+						} else if (argv[i][j] == 'l' || argv[i][j] == 'L') {
+							show_long = 1;
+						} else {
+							print_error("ls", str_msg_invalid_option, argv[i]);
+							return 1;
+						}
+					}
+
+					continue;
+				}
+
+				path = argv[i];
+				path_count++;
+			}
+
+			if (path_count > 1) {
+				print_error("ls", str_msg_too_many, 0);
+				return 1;
+			}
+
+			char joined[256];
+			char norm[256];
+			const char *target;
+			const char *display;
+
+			if (path == 0) {
+				target = cwd;
+				display = ".";
+			} else if (path[0] == '/') {
+				target = path;
+				display = path;
+			} else {
+				int w = 0;
+
+				for (int i = 0; cwd[i] != '\0' && w < 255; i++) {
+					joined[w++] = cwd[i];
+				}
+
+				if (w > 0 && joined[w - 1] != '/') {
+					joined[w++] = '/';
+				}
+
+				for (int i = 0; path[i] != '\0' && w < 255; i++) {
+					joined[w++] = path[i];
+				}
+
+				joined[w] = '\0';
+				target = joined;
+				display = path;
+			}
+
+			path_normalize(target, norm, 256);
+
+			uint32_t ino;
+
+			if (ext2_lookup(norm, &ino) != 0) {
+				print_error("ls", str_msg_noent, display);
+				return 1;
+			}
+
+			struct ext2_inode inode;
+			ext2_read_inode(ino, &inode);
+
+			if ((inode.i_mode & 0xF000) != 0x4000) {
+				print_error("ls", str_msg_notdir, display);
+				return 1;
+			}
+
+			ext2_ls(norm, show_hidden, show_inode, show_long);
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+int cmd_mkdir(int argc, char **argv, int privilege) {
+	if (check_permission("mkdir", 0, privilege)) {
+		if (check_argc("mkdir", 1, -1, argc)) {
+			int ret = 0;
+
+			for (int i = 0; i < argc; i++) {
+				char joined[256];
+				char norm[256];
+				const char *target;
+
+				if (argv[i][0] == '/') {
+					target = argv[i];
+				} else {
+					int w = 0;
+					for (int j = 0; cwd[j] != '\0' && w < 255; j++) {
+						joined[w++] = cwd[j];
+					}
+					if (w > 0 && joined[w - 1] != '/') {
+						joined[w++] = '/';
+					}
+					for (int j = 0; argv[i][j] != '\0' && w < 255; j++) {
+						joined[w++] = argv[i][j];
+					}
+					joined[w] = '\0';
+					target = joined;
+				}
+
+				path_normalize(target, norm, 256);
+
+				int r = ext2_mkdir(norm);
+
+				if (r == 0) {
+					continue;
+				}
+
+				if (r == -1) {
+					print_error("mkdir", str_msg_noent, argv[i]);
+				} else if (r == -2) {
+					print_error("mkdir", str_msg_exists, argv[i]);
+				} else if (r == -3) {
+					print_error("mkdir", str_msg_notdir, argv[i]);
+				} else {
+					print_error("mkdir", str_msg_nospace, argv[i]);
+				}
+
+				ret = 1;
+			}
+
+			return ret;
+		}
+	}
+
+	return 1;
+}
+
+int cmd_pwd(int argc, char **argv, int privilege) {
+	(void)argv;
+
+	if (check_permission("pwd", 0, privilege)) {
+		if (check_argc("pwd", 0, 0, argc)) {
+			print(cwd);
+			print_char('\n');
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+int cmd_reboot(int argc, char **argv, int privilege) {
+	(void)argv;
+
+	if (check_permission("reboot", 0, privilege)) {
+		if (check_argc("reboot", 0, 0, argc)) {
+			__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)0xFE), "d"((uint16_t)0x64));
+
+			while (1) {
+				__asm__ volatile ("hlt");
+			}
+		}
+	}
+
+	return 1;
+}
+
+int cmd_rm(int argc, char **argv, int privilege) {
+	if (check_permission("rm", 1, privilege)) {
+		if (check_argc("rm", 1, -1, argc)) {
+			int recursive = 0;
+			int force = 0;
+			int ret = 0;
+
+			for (int i = 0; i < argc; i++) {
+				if (argv[i][0] == '-' && argv[i][1] != '\0') {
+					for (int j = 1; argv[i][j] != '\0'; j++) {
+						if (argv[i][j] == 'r' || argv[i][j] == 'R') {
+							recursive = 1;
+						} else if (argv[i][j] == 'f' || argv[i][j] == 'F') {
+							force = 1;
+						} else {
+							print_error("rm", str_msg_invalid_option, argv[i]);
+							return 1;
+						}
+					}
+
+					continue;
+				}
+
+				char joined[256];
+				char norm[256];
+				const char *target;
+
+				if (argv[i][0] == '/') {
+					target = argv[i];
+				} else {
+					int w = 0;
+					for (int j = 0; cwd[j] != '\0' && w < 255; j++) {
+						joined[w++] = cwd[j];
+					}
+					if (w > 0 && joined[w - 1] != '/') {
+						joined[w++] = '/';
+					}
+					for (int j = 0; argv[i][j] != '\0' && w < 255; j++) {
+						joined[w++] = argv[i][j];
+					}
+					joined[w] = '\0';
+					target = joined;
+				}
+
+				path_normalize(target, norm, 256);
+
+				int r = ext2_remove(norm, recursive);
+
+				if (r == 0) {
+					continue;
+				}
+
+				if (r == -2 && force) {
+					continue;
+				}
+
+				if (r == -1 || r == -2) {
+					print_error("rm", str_msg_noent, argv[i]);
+				} else if (r == -3) {
+					print_error("rm", str_msg_notdir, argv[i]);
+				} else if (r == -4) {
+					print_error("rm", str_msg_isdir, argv[i]);
+				}
+
+				ret = 1;
+			}
+
+			return ret;
+		}
+	}
+
+	return 1;
+}
+
+int cmd_rmdir(int argc, char **argv, int privilege) {
+	if (check_permission("rmdir", 1, privilege)) {
+		if (check_argc("rmdir", 1, -1, argc)) {
+			int ret = 0;
+
+			for (int i = 0; i < argc; i++) {
+				char joined[256];
+				char norm[256];
+				const char *target;
+
+				if (argv[i][0] == '/') {
+					target = argv[i];
+				} else {
+					int w = 0;
+					for (int j = 0; cwd[j] != '\0' && w < 255; j++) {
+						joined[w++] = cwd[j];
+					}
+					if (w > 0 && joined[w - 1] != '/') {
+						joined[w++] = '/';
+					}
+					for (int j = 0; argv[i][j] != '\0' && w < 255; j++) {
+						joined[w++] = argv[i][j];
+					}
+					joined[w] = '\0';
+					target = joined;
+				}
+
+				path_normalize(target, norm, 256);
+
+				int r = ext2_rmdir(norm);
+
+				if (r == 0) {
+					continue;
+				}
+
+				if (r == -1 || r == -2) {
+					print_error("rmdir", str_msg_noent, argv[i]);
+				} else if (r == -3 || r == -4) {
+					print_error("rmdir", str_msg_notdir, argv[i]);
+				} else {
+					print_error("rmdir", str_msg_notempty, argv[i]);
+				}
+
+				ret = 1;
+			}
+
+			return ret;
+		}
+	}
+
+	return 1;
+}
+
+int cmd_stat(int argc, char **argv, int privilege) {
+	if (check_permission("stat", 0, privilege)) {
+		if (check_argc("stat", 1, 1, argc)) {
+			char joined[256];
+			char norm[256];
+			const char *target;
+
+			if (argv[0][0] == '/') {
+				target = argv[0];
+			} else {
+				int w = 0;
+
+				for (int i = 0; cwd[i] != '\0' && w < 255; i++) {
+					joined[w++] = cwd[i];
+				}
+
+				if (w > 0 && joined[w - 1] != '/') {
+					joined[w++] = '/';
+				}
+
+				for (int i = 0; argv[0][i] != '\0' && w < 255; i++) {
+					joined[w++] = argv[0][i];
+				}
+
+				joined[w] = '\0';
+				target = joined;
+			}
+
+			path_normalize(target, norm, 256);
+
+			uint32_t ino;
+
+			if (ext2_lookup(norm, &ino) != 0) {
+				print_error("stat", str_msg_noent, argv[0]);
+				return 1;
+			}
+
+			struct ext2_inode inode;
+			ext2_read_inode(ino, &inode);
+
+			uint16_t mode = inode.i_mode & 0xF000;
+			const char *type;
+
+			if (mode == 0x8000) {
+				type = "regular file";
+			} else if (mode == 0x4000) {
+				type = "directory";
+			} else if (mode == 0xA000) {
+				type = "symbolic link";
+			} else if (mode == 0x2000) {
+				type = "character device";
+			} else if (mode == 0x6000) {
+				type = "block device";
+			} else if (mode == 0x1000) {
+				type = "fifo";
+			} else if (mode == 0xC000) {
+				type = "socket";
+			} else {
+				type = "unknown";
+			}
+
+			print("  File: ");
+			print(argv[0]);
+			print_char('\n');
+
+			print("  Size: ");
+			print_uint(inode.i_size);
+			print("          Blocks: ");
+			print_uint(inode.i_blocks);
+			print("          Type: ");
+			print(type);
+			print_char('\n');
+
+			print("  Inode: ");
+			print_uint(ino);
+			print("          Links: ");
+			print_uint(inode.i_links_count);
+			print_char('\n');
+
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+int cmd_sudo(int argc, char **argv, int privilege) {
+	if (check_permission("sudo", 0, privilege)) {
+		if (argc < 1) {
+			return 0;
+		}
+
+		for (int i = 0; i < command_count; i++) {
+			if (strcmp(argv[0], commands[i].name) == 0) {
+				return commands[i].func(argc - 1, argv + 1, SUDO_PRIVILEGE);
+			}
+		}
+
+		print_error("sudo", str_msg_cmd_not_found, argv[0]);
+		return 1;
+	}
+
+	return 1;
+}
+
+// 从绝对路径拆出父目录与文件名，成功返回 0
+static int split_abs_path(const char *path, char *parent, char *name) {
+	int len = 0;
+	while (path[len] != '\0') {
+		len++;
+	}
+
+	if (len < 2 || path[0] != '/') {
+		return -1;
+	}
+
+	int slash = -1;
+	for (int i = len - 1; i >= 1; i--) {
+		if (path[i] == '/') {
+			slash = i;
+			break;
+		}
+	}
+
+	if (slash == -1) {
+		parent[0] = '/';
+		parent[1] = '\0';
+
+		int k = 0;
+		for (int i = 1; i < len; i++) {
+			name[k++] = path[i];
+		}
+		name[k] = '\0';
+	} else {
+		for (int i = 0; i < slash; i++) {
+			parent[i] = path[i];
+		}
+		parent[slash] = '\0';
+
+		int k = 0;
+		for (int i = slash + 1; i < len; i++) {
+			name[k++] = path[i];
+		}
+		name[k] = '\0';
+	}
+
+	return 0;
+}
+
+int cmd_touch(int argc, char **argv, int privilege) {
+	if (check_permission("touch", 0, privilege)) {
+		if (check_argc("touch", 1, -1, argc)) {
+			int ret = 0;
+
+			for (int i = 0; i < argc; i++) {
+				char joined[256];
+				char norm[256];
+				const char *target;
+
+				if (argv[i][0] == '/') {
+					target = argv[i];
+				} else {
+					int w = 0;
+					for (int j = 0; cwd[j] != '\0' && w < 255; j++) {
+						joined[w++] = cwd[j];
+					}
+					if (w > 0 && joined[w - 1] != '/') {
+						joined[w++] = '/';
+					}
+					for (int j = 0; argv[i][j] != '\0' && w < 255; j++) {
+						joined[w++] = argv[i][j];
+					}
+					joined[w] = '\0';
+					target = joined;
+				}
+
+				path_normalize(target, norm, 256);
+
+				uint32_t existing;
+				if (ext2_lookup(norm, &existing) == 0) {
+					continue;
+				}
+
+				char parent[256];
+				char name[256];
+
+				if (split_abs_path(norm, parent, name) != 0) {
+					print_error("touch", str_msg_noent, argv[i]);
+					ret = 1;
+					continue;
+				}
+
+				uint32_t parent_ino;
+
+				if (ext2_lookup(parent, &parent_ino) != 0) {
+					print_error("touch", str_msg_noent, argv[i]);
+					ret = 1;
+					continue;
+				}
+
+				struct ext2_inode pino;
+				ext2_read_inode(parent_ino, &pino);
+
+				if ((pino.i_mode & 0xF000) != 0x4000) {
+					print_error("touch", str_msg_notdir, argv[i]);
+					ret = 1;
+					continue;
+				}
+
+				uint32_t new_ino = ext2_alloc_inode();
+
+				if (new_ino == 0) {
+					print_error("touch", str_msg_nospace, argv[i]);
+					ret = 1;
+					continue;
+				}
+
+				struct ext2_inode new_inode;
+				for (uint32_t j = 0; j < sizeof(struct ext2_inode); j++) {
+					((uint8_t *)&new_inode)[j] = 0;
+				}
+
+				new_inode.i_mode = 0x81A4;
+				new_inode.i_size = 0;
+				new_inode.i_links_count = 1;
+
+				ext2_write_inode(new_ino, &new_inode);
+
+				if (ext2_add_dir_entry(parent_ino, new_ino, name, 1) != 0) {
+					print_error("touch", str_msg_nospace, argv[i]);
+					ret = 1;
+					continue;
+				}
+			}
+
+			return ret;
+		}
+	}
+
+	return 1;
+}
+
+int cmd_tree(int argc, char **argv, int privilege) {
+	if (check_permission("tree", 0, privilege)) {
+		if (check_argc("tree", 0, 1, argc)) {
 			char joined[256];
 			char norm[256];
 			const char *target;
@@ -243,9 +849,7 @@ int cmd_ls(int argc, char **argv, int privilege) {
 			uint32_t ino;
 
 			if (ext2_lookup(norm, &ino) != 0) {
-				print(str_ls_noent);
-				print(display);
-				print_char('\n');
+				print_error("tree", str_msg_noent, display);
 				return 1;
 			}
 
@@ -253,30 +857,14 @@ int cmd_ls(int argc, char **argv, int privilege) {
 			ext2_read_inode(ino, &inode);
 
 			if ((inode.i_mode & 0xF000) != 0x4000) {
-				print(str_ls_notdir);
-				print(display);
-				print_char('\n');
+				print_error("tree", str_msg_notdir, display);
 				return 1;
 			}
 
-			ext2_ls(norm);
+			print(display);
+			print_char('\n');
+			ext2_tree(norm, 0);
 			return 0;
-		}
-	}
-
-	return 1;
-}
-
-int cmd_reboot(int argc, char **argv, int privilege) {
-	(void)argv;
-
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, 0, argc)) {
-			__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)0xFE), "d"((uint16_t)0x64));
-
-			while (1) {
-				__asm__ volatile ("hlt");
-			}
 		}
 	}
 
@@ -286,8 +874,8 @@ int cmd_reboot(int argc, char **argv, int privilege) {
 int cmd_true(int argc, char **argv, int privilege) {
 	(void)argv;
 
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, 0, argc)) {
+	if (check_permission("true", 0, privilege)) {
+		if (check_argc("true", 0, 0, argc)) {
 			return 0;
 		}
 	}
@@ -298,8 +886,8 @@ int cmd_true(int argc, char **argv, int privilege) {
 int cmd_uptime(int argc, char **argv, int privilege) {
 	(void)argv;
 
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, 0, argc)) {
+	if (check_permission("uptime", 0, privilege)) {
+		if (check_argc("uptime", 0, 0, argc)) {
 			uint64_t sec = ticks / 1000;
 			uint64_t min = sec / 60;
 			uint64_t hour = min / 60;
@@ -335,8 +923,8 @@ int cmd_uptime(int argc, char **argv, int privilege) {
 int cmd_whoami(int argc, char **argv, int privilege) {
 	(void)argv;
 
-	if (check_permission(0, privilege)) {
-		if (check_argc(0, 0, argc)) {
+	if (check_permission("whoami", 0, privilege)) {
+		if (check_argc("whoami", 0, 0, argc)) {
 			print(user);
 			print_char('\n');
 			return 0;

@@ -22,5 +22,9 @@ void shell_run(void);
 void build_prompt(void);
 void path_normalize(const char *in, char *out, int out_size);
 void print_cmd_not_found(const char *source, const char *cmd);
+void print_error(const char *source, const char *msg, const char *detail);
+
+int check_permission(const char *source, int need, int cur);
+int check_argc(const char *source, int min, int max, int cur);
 
 #endif

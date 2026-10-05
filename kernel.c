@@ -468,17 +468,27 @@ void scroll_screen(int lines) {
 	cursor_hide();
 	cursor_forget();
 
-	uint32_t line_bytes = fb_width * (fb_bpp / 8);
 	int char_pixels = lines * 16;
 	uint8_t *base = (uint8_t *)fb_addr;
+	uint32_t row_bytes = fb_pitch;
 
 	if (char_pixels > 0) {
+		uint32_t qwords = row_bytes / 8;
+		uint32_t rem = row_bytes % 8;
+
 		for (uint32_t y = char_pixels; y < fb_height; y++) {
 			uint8_t *src = base + y * fb_pitch;
 			uint8_t *dst = base + (y - char_pixels) * fb_pitch;
 
-			for (uint32_t i = 0; i < line_bytes; i++) {
-				dst[i] = src[i];
+			uint64_t *s64 = (uint64_t *)src;
+			uint64_t *d64 = (uint64_t *)dst;
+
+			for (uint32_t i = 0; i < qwords; i++) {
+				d64[i] = s64[i];
+			}
+
+			for (uint32_t i = 0; i < rem; i++) {
+				dst[qwords * 8 + i] = src[qwords * 8 + i];
 			}
 		}
 
@@ -487,16 +497,36 @@ void scroll_screen(int lines) {
 		unsigned char saved_b = color_b;
 
 		__asm__ volatile ("cli");
-		change_color(bg_r, bg_g, bg_b);
 
 		for (uint32_t y = fb_height - char_pixels; y < fb_height; y++) {
-			for (uint32_t x = 0; x < fb_width; x++) {
-				draw_pixel(x, y);
+			uint8_t *row = base + y * fb_pitch;
+
+			if (fb_bpp == 32) {
+				uint32_t bg = ((uint32_t)bg_r << 16) | ((uint32_t)bg_g << 8) | bg_b;
+
+				for (uint32_t x = 0; x < fb_width; x++) {
+					((uint32_t *)row)[x] = bg;
+				}
+			} else if (fb_bpp == 24) {
+				for (uint32_t x = 0; x < fb_width; x++) {
+					row[x * 3] = bg_b;
+					row[x * 3 + 1] = bg_g;
+					row[x * 3 + 2] = bg_r;
+				}
+			} else if (fb_bpp == 16) {
+				uint16_t v = ((uint16_t)(bg_r >> 3) << 11) | ((uint16_t)(bg_g >> 2) << 5) | (bg_b >> 3);
+
+				for (uint32_t x = 0; x < fb_width; x++) {
+					((uint16_t *)row)[x] = v;
+				}
 			}
 		}
 
-		change_color(saved_r, saved_g, saved_b);
 		__asm__ volatile ("sti");
+
+		color_r = saved_r;
+		color_g = saved_g;
+		color_b = saved_b;
 	}
 }
 

@@ -1,28 +1,30 @@
 #ifndef STRINGS_H
 #define STRINGS_H
 
-// shell 报错
-#define str_src_dogus "dogus"
-#define str_fmt_cmd_mid ": command not found: "
-#define str_err_permission_denied ": permission denied\n"
-#define str_err_too_few_args ": too few arguments\n"
-#define str_err_too_many_args ": too many arguments\n"
+// 通用报错信息
+#define str_msg_cmd_not_found "command not found"
+#define str_msg_noent "No such file or directory"
+#define str_msg_notdir "Not a directory"
+#define str_msg_isdir "Is a directory"
+#define str_msg_exists "File exists"
+#define str_msg_notempty "Directory not empty"
+#define str_msg_nospace "No space left on device"
+#define str_msg_permission "Permission denied"
+#define str_msg_too_few "too few arguments"
+#define str_msg_too_many "too many arguments"
+#define str_msg_invalid_option "invalid option"
 
 // uptime 输出
 #define str_uptime_up "up "
 #define str_uptime_days " days, "
 
+// cat
+#define str_cmd_cat_summary "concatenate files"
+#define str_cmd_cat_detail "cat - concatenate files\n\nUsage: cat file ...\n\nPrint the contents of the given files, one after another.\n"
+
 // cd
 #define str_cmd_cd_summary "change directory"
 #define str_cmd_cd_detail "cd - change directory\n\nUsage: cd [path]\n\nChange the current working directory.\nWith no argument, change to the root directory.\n"
-#define str_cd_noent "cd: No such file or directory: "
-#define str_cd_notdir "cd: Not a directory: "
-
-// ls
-#define str_cmd_ls_summary "list directory"
-#define str_cmd_ls_detail "ls - list directory\n\nUsage: ls [path]\n\nList the contents of the directory at the given path.\nWith no argument, list the root directory.\n"
-#define str_ls_noent "ls: No such file or directory: "
-#define str_ls_notdir "ls: Not a directory: "
 
 // clear
 #define str_cmd_clear_summary "clear screen"
@@ -50,13 +52,43 @@
 
 // ls
 #define str_cmd_ls_summary "list directory"
-#define str_cmd_ls_detail "ls - list directory\n\nUsage: ls [path]\n\nList the contents of the directory at the given path.\nWith no argument, list the root directory.\n"
-#define str_ls_noent "ls: No such file or directory: "
-#define str_ls_notdir "ls: Not a directory: "
+#define str_cmd_ls_detail "ls - list directory\n\nUsage: ls [-a] [-i] [-l] [path]\n\nList the contents of the directory at the given path.\n-a  show hidden entries\n-i  show inode numbers\n-l  use long listing format\n"
+
+// mkdir
+#define str_cmd_mkdir_summary "create directories"
+#define str_cmd_mkdir_detail "mkdir - create directories\n\nUsage: mkdir dir ...\n\nCreate one or more directories.\n"
+
+// pwd
+#define str_cmd_pwd_summary "print working directory"
+#define str_cmd_pwd_detail "pwd - print working directory\n\nUsage: pwd\n\nPrint the current working directory.\n"
 
 // reboot
 #define str_cmd_reboot_summary "reboot system"
 #define str_cmd_reboot_detail "reboot - reboot system\n\nUsage: reboot\n\nReboot the system. On QEMU this resets the virtual machine.\n"
+
+// rm
+#define str_cmd_rm_summary "remove files"
+#define str_cmd_rm_detail "rm - remove files\n\nUsage: rm [-r] [-f] file ...\n\nRemove files. With -r, remove directories recursively.\nWith -f, ignore nonexistent files.\n"
+
+// rmdir
+#define str_cmd_rmdir_summary "remove empty directories"
+#define str_cmd_rmdir_detail "rmdir - remove empty directories\n\nUsage: rmdir dir ...\n\nRemove one or more empty directories.\n"
+
+// stat
+#define str_cmd_stat_summary "show file status"
+#define str_cmd_stat_detail "stat - show file status\n\nUsage: stat file\n\nPrint inode number, size, blocks, links and file type.\n"
+
+// sudo
+#define str_cmd_sudo_summary "execute as superuser"
+#define str_cmd_sudo_detail "sudo - execute as superuser\n\nUsage: sudo command [args ...]\n\nExecute the given command with elevated privilege.\n"
+
+// touch
+#define str_cmd_touch_summary "create empty file"
+#define str_cmd_touch_detail "touch - create empty file\n\nUsage: touch file ...\n\nCreate an empty file if it does not exist.\n"
+
+// tree
+#define str_cmd_tree_summary "list directory tree"
+#define str_cmd_tree_detail "tree - list directory tree\n\nUsage: tree [path]\n\nList the contents of the directory in a tree-like format.\n"
 
 // true
 #define str_cmd_true_summary "return success"
