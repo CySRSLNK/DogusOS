@@ -50,6 +50,10 @@
 #define str_cmd_hostname_summary "print host name"
 #define str_cmd_hostname_detail "hostname - print host name\n\nUsage: hostname\n\nPrint the host name of this system.\n"
 
+// id
+#define str_cmd_id_summary "print user identity"
+#define str_cmd_id_detail "id - print user identity\n\nUsage: id\n\nPrint the current user name, UID and GID.\n"
+
 // ls
 #define str_cmd_ls_summary "list directory"
 #define str_cmd_ls_detail "ls - list directory\n\nUsage: ls [-a] [-i] [-l] [path]\n\nList the contents of the directory at the given path.\nWith no path, list the current directory.\n-a  show hidden entries\n-i  show inode numbers\n-l  use long listing format (type, size, name)\nOptions may be combined, for example -ail.\nOutput is multi-column except with -l.\n"
@@ -78,6 +82,10 @@
 #define str_cmd_stat_summary "show file status"
 #define str_cmd_stat_detail "stat - show file status\n\nUsage: stat file\n\nPrint inode number, size, blocks, links and file type.\n"
 
+// su
+#define str_cmd_su_summary "switch user"
+#define str_cmd_su_detail "su - switch user\n\nUsage: su [user]\n\nSwitch to the named user.\nWith no argument, switch to root.\nThe user must exist in /etc/passwd.\nNo password is requested.\n"
+
 // sudo
 #define str_cmd_sudo_summary "execute as superuser"
 #define str_cmd_sudo_detail "sudo - execute as superuser\n\nUsage: sudo command [args ...]\n\nExecute the given command with elevated privilege.\nWith no command, do nothing.\nNested sudo is allowed.\n"
@@ -97,6 +105,14 @@
 // uptime
 #define str_cmd_uptime_summary "show uptime"
 #define str_cmd_uptime_detail "uptime - show uptime\n\nUsage: uptime\n\nPrint how long the system has been running, in the form: up N days, H:MM:SS.\n"
+
+// useradd
+#define str_cmd_useradd_summary "create a new user"
+#define str_cmd_useradd_detail "useradd - create a new user\n\nUsage: useradd name\n\nCreate a new user with the given name.\nAn unused UID is assigned automatically.\nThe user is added to /etc/passwd.\n"
+
+// userdel
+#define str_cmd_userdel_summary "delete a user"
+#define str_cmd_userdel_detail "userdel - delete a user\n\nUsage: userdel name\n\nDelete the named user from /etc/passwd.\n"
 
 // whoami
 #define str_cmd_whoami_summary "print user name"

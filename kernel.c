@@ -942,6 +942,25 @@ void kernel_main(uint64_t mb2_info_addr) {
 	disk_init();
 	ext2_init();
 
+	uint32_t etc_ino;
+
+	if (ext2_lookup("/etc", &etc_ino) != 0) {
+		ext2_mkdir("/etc");
+	}
+
+	uint32_t passwd_ino;
+
+	if (ext2_lookup("/etc/passwd", &passwd_ino) != 0) {
+		const char *init = "root:x:0:0\nuser:x:1000:1000\n";
+		uint32_t n = 0;
+
+		while (init[n] != '\0') {
+			n++;
+		}
+
+		ext2_write_file("/etc/passwd", init, n, 0);
+	}
+
 	__asm__ volatile ("sti");
 
 	clear_screen();
