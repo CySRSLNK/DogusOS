@@ -3,6 +3,7 @@
 #include "shell.h"
 #include "commands.h"
 #include "ext2.h"
+#include "users.h"
 #include "strings.h"
 
 int check_permission(const char *source, int need, int cur);
@@ -17,6 +18,7 @@ struct cmd commands[] = {
 	{"help", cmd_help, str_cmd_help_summary, str_cmd_help_detail},
 	{"history", cmd_history, str_cmd_history_summary, str_cmd_history_detail},
 	{"hostname", cmd_hostname, str_cmd_hostname_summary, str_cmd_hostname_detail},
+	{"id", cmd_id, str_cmd_id_summary, str_cmd_id_detail},
 	{"ls", cmd_ls, str_cmd_ls_summary, str_cmd_ls_detail},
 	{"mkdir", cmd_mkdir, str_cmd_mkdir_summary, str_cmd_mkdir_detail},
 	{"pwd", cmd_pwd, str_cmd_pwd_summary, str_cmd_pwd_detail},
@@ -24,11 +26,14 @@ struct cmd commands[] = {
 	{"rm", cmd_rm, str_cmd_rm_summary, str_cmd_rm_detail},
 	{"rmdir", cmd_rmdir, str_cmd_rmdir_summary, str_cmd_rmdir_detail},
 	{"stat", cmd_stat, str_cmd_stat_summary, str_cmd_stat_detail},
+	{"su", cmd_su, str_cmd_su_summary, str_cmd_su_detail},
 	{"sudo", cmd_sudo, str_cmd_sudo_summary, str_cmd_sudo_detail},
 	{"touch", cmd_touch, str_cmd_touch_summary, str_cmd_touch_detail},
 	{"tree", cmd_tree, str_cmd_tree_summary, str_cmd_tree_detail},
 	{"true", cmd_true, str_cmd_true_summary, str_cmd_true_detail},
 	{"uptime", cmd_uptime, str_cmd_uptime_summary, str_cmd_uptime_detail},
+	{"useradd", cmd_useradd, str_cmd_useradd_summary, str_cmd_useradd_detail},
+	{"userdel", cmd_userdel, str_cmd_userdel_summary, str_cmd_userdel_detail},
 	{"whoami", cmd_whoami, str_cmd_whoami_summary, str_cmd_whoami_detail},
 	{"write", cmd_write, str_cmd_write_summary, str_cmd_write_detail},
 };
@@ -266,6 +271,33 @@ int cmd_hostname(int argc, char **argv, int privilege) {
 	if (check_permission("hostname", 0, privilege)) {
 		if (check_argc("hostname", 0, 0, argc)) {
 			print(host);
+			print_char('\n');
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+int cmd_id(int argc, char **argv, int privilege) {
+	(void)argv;
+
+	if (check_permission("id", 0, privilege)) {
+		if (check_argc("id", 0, 0, argc)) {
+			uint32_t gid = 0;
+
+			users_gid_by_uid(current_uid, &gid);
+
+			print("uid=");
+			print_uint(current_uid);
+
+			print("(");
+			print(current_user);
+			print(")");
+
+			print(" gid=");
+			print_uint(gid);
+
 			print_char('\n');
 			return 0;
 		}
@@ -564,22 +596,60 @@ int cmd_stat(int argc, char **argv, int privilege) {
 	return 1;
 }
 
-int cmd_sudo(int argc, char **argv, int privilege) {
-	if (check_permission("sudo", 0, privilege)) {
-		if (argc < 1) {
-			return 0;
+int cmd_su(int argc, char **argv, int privilege) {
+	(void)privilege;
+
+	if (check_argc("su", 0, 1, argc)) {
+		const char *target_name;
+
+		if (argc == 0) {
+			target_name = "root";
+		} else {
+			target_name = argv[0];
 		}
 
-		for (int i = 0; i < command_count; i++) {
-			if (strcmp(argv[0], commands[i].name) == 0) {
-				return commands[i].func(argc - 1, argv + 1, SUDO_PRIVILEGE);
-			}
+		uint32_t uid;
+
+		if (users_uid_by_name(target_name, &uid) != 0) {
+			print_error("su", "user not found", target_name);
+			return 1;
 		}
 
-		print_error("sudo", str_msg_cmd_not_found, argv[0]);
-		return 1;
+		current_uid = uid;
+		current_euid = uid;
+
+		if (users_name_by_uid(uid, current_user, 32) != 0) {
+			print_error("su", "user not found", target_name);
+			return 1;
+		}
+
+		build_prompt();
+		return 0;
 	}
 
+	return 1;
+}
+
+int cmd_sudo(int argc, char **argv, int privilege) {
+	(void)privilege;
+
+	if (argc < 1) {
+		return 0;
+	}
+
+	for (int i = 0; i < command_count; i++) {
+		if (strcmp(argv[0], commands[i].name) == 0) {
+			uint32_t saved_euid = current_euid;
+			current_euid = 0;
+
+			int ret = commands[i].func(argc - 1, argv + 1, 1);
+
+			current_euid = saved_euid;
+			return ret;
+		}
+	}
+
+	print_error("sudo", str_msg_cmd_not_found, argv[0]);
 	return 1;
 }
 
@@ -718,12 +788,70 @@ int cmd_uptime(int argc, char **argv, int privilege) {
 	return 1;
 }
 
+int cmd_useradd(int argc, char **argv, int privilege) {
+	if (check_permission("useradd", 1, privilege)) {
+		if (check_argc("useradd", 1, 1, argc)) {
+			int r = users_add(argv[0]);
+
+			if (r == 0) {
+				return 0;
+			}
+
+			if (r == -1) {
+				print_error("useradd", "user already exists", argv[0]);
+			} else if (r == -2) {
+				print_error("useradd", "too many users", 0);
+			} else {
+				print_error("useradd", "invalid name", argv[0]);
+			}
+
+			return 1;
+		}
+	}
+
+	return 1;
+}
+
+int cmd_userdel(int argc, char **argv, int privilege) {
+	if (check_permission("userdel", 1, privilege)) {
+		if (check_argc("userdel", 1, 1, argc)) {
+			int is_current = 1;
+			int j = 0;
+
+			while (current_user[j] != '\0' || argv[0][j] != '\0') {
+				if (current_user[j] != argv[0][j]) {
+					is_current = 0;
+					break;
+				}
+
+				j++;
+			}
+
+			if (is_current) {
+				print_error("userdel", "cannot remove current user", argv[0]);
+				return 1;
+			}
+
+			int r = users_del(argv[0]);
+
+			if (r == 0) {
+				return 0;
+			}
+
+			print_error("userdel", "user not found", argv[0]);
+			return 1;
+		}
+	}
+
+	return 1;
+}
+
 int cmd_whoami(int argc, char **argv, int privilege) {
 	(void)argv;
 
 	if (check_permission("whoami", 0, privilege)) {
 		if (check_argc("whoami", 0, 0, argc)) {
-			print(user);
+			print(current_user);
 			print_char('\n');
 			return 0;
 		}

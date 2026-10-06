@@ -4,10 +4,13 @@
 #define HIST_SIZE	64
 #define HIST_LINE_LEN	256
 
-extern int current_privilege;
+extern uint32_t current_uid;
+extern uint32_t current_euid;
+
+extern char current_user[32];
+
 extern int last_exit_code;
 
-extern const char *user;
 extern const char *host;
 
 extern char cwd[256];

@@ -3,6 +3,7 @@
 #include "shell.h"
 #include "commands.h"
 #include "ext2.h"
+#include "users.h"
 #include "strings.h"
 
 #define LINE_BUF_SIZE	256
@@ -23,10 +24,12 @@ int line_old_len = 0;
 #define KEY_UP		0x06
 #define KEY_DOWN	0x07
 
-const char *user = "user";
 const char *host = "host";
 
-int current_privilege = 0;
+uint32_t current_uid = 0;
+uint32_t current_euid = 0;
+
+char current_user[32] = "root";
 
 char cwd[256] = "/";
 char path_buf[256] = "/";
@@ -46,8 +49,8 @@ int last_exit_code = 0;
 void build_prompt(void) {
 	int i = 0;
 
-	while (user[i] != '\0' && i < 127) {
-		prompt_buf[i] = user[i];
+	while (current_user[i] != '\0' && i < 127) {
+		prompt_buf[i] = current_user[i];
 		i++;
 	}
 
@@ -706,13 +709,15 @@ void handle_command(char *line) {
 		return;
 	}
 
+	int derived_privilege = (current_euid == 0) ? 1 : 0;
+
 	for (int i = 0; i < command_count; i++) {
 		if (strcmp(expanded_argv[0], commands[i].name) == 0) {
 			int ret;
 
 			if (redir_file != 0) {
 				redir_begin();
-				ret = commands[i].func(eargc - 1, expanded_argv + 1, current_privilege);
+				ret = commands[i].func(eargc - 1, expanded_argv + 1, derived_privilege);
 
 				int len = 0;
 				const char *data = redir_end(&len);
@@ -727,7 +732,7 @@ void handle_command(char *line) {
 					ret = 1;
 				}
 			} else {
-				ret = commands[i].func(eargc - 1, expanded_argv + 1, current_privilege);
+				ret = commands[i].func(eargc - 1, expanded_argv + 1, derived_privilege);
 			}
 
 			last_exit_code = ret;
@@ -740,6 +745,12 @@ void handle_command(char *line) {
 }
 
 void shell_init(void) {
+	if (users_load() > 0) {
+		if (users_name_by_uid(current_uid, current_user, 32) != 0) {
+			// 保持默认
+		}
+	}
+
 	build_prompt();
 
 	line_start_row = 0;
