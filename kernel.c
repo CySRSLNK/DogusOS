@@ -3,8 +3,8 @@
 #include "kernel.h"
 #include "shell.h"
 #include "commands.h"
-#include "font.h"
 #include "ext2.h"
+#include "font.h"
 
 // 字符到 font8x16 下标的映射表，顺序为小写、大写、数字、标点
 static const char char_map[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ,./;'[]\\`-=<>?:\"{}|~!@#$%^&*()_+";
@@ -25,9 +25,6 @@ int font_index(char c) {
 #define MB2_TAG_TYPE_FRAMEBUFFER	8
 
 // LOCK
-// 深度计数版，同一作用域可重复调用，跨函数嵌套也安全
-// 只有最外层真正 cli 与 popfq，内层只累加计数
-// 临界区内禁止调用 delay_ms 或 hlt，IF 清零后等不到中断会死锁
 static uint64_t cursor_lock_flags;
 volatile int cursor_lock_depth = 0;
 
@@ -77,8 +74,11 @@ int cursor_row = 0;
 // 光标开关
 int cursor_on = 1;
 
-// 光标可见状态，闪烁相位，timer_handler 翻转
+// 光标可见状态，闪烁相位
 volatile int cursor_visible = 1;
+
+// 闪烁半周期，毫秒
+#define CURSOR_BLINK_MS	200
 
 // 下次翻转闪烁的毫秒时刻
 uint64_t cursor_blink_next = CURSOR_BLINK_MS;
@@ -87,9 +87,6 @@ uint64_t cursor_blink_next = CURSOR_BLINK_MS;
 static int cursor_painted = 0;
 static int cursor_painted_col = 0;
 static int cursor_painted_row = 0;
-
-// 光标条原始像素保存，底部两行共 16 像素
-static uint32_t cursor_save[16];
 
 // 毫秒计数，中断里加一
 volatile uint64_t ticks = 0;
@@ -100,6 +97,30 @@ volatile uint64_t ticks = 0;
 volatile char key_buf[KEY_BUF_SIZE];
 volatile int key_head = 0;
 volatile int key_tail = 0;
+
+// 重定向状态
+#define REDIR_BUF_SIZE	65536
+
+static int redir_active = 0;
+static char redir_buf[REDIR_BUF_SIZE];
+static int redir_len = 0;
+
+int redir_is_active(void) {
+	return redir_active;
+}
+
+void redir_begin(void) {
+	redir_active = 1;
+	redir_len = 0;
+	redir_buf[0] = '\0';
+}
+
+const char *redir_end(int *len) {
+	redir_active = 0;
+	redir_buf[redir_len] = '\0';
+	*len = redir_len;
+	return redir_buf;
+}
 
 // 扫描码到字符的映射表，美式 QWERTY，不支持 Shift
 static const char scancode_map[256] = {
@@ -121,7 +142,7 @@ static const char scancode_map[256] = {
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
-// 扫描码到字符的映射表，美式 QWERTY，Shift 上档
+// 扫描码到字符的映射表，Shift 上档
 static const char scancode_map_shift[256] = {
 	0, 0, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', 0, 0,
 	'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', 0, 0,
@@ -311,8 +332,7 @@ void draw_char(int cx, int cy, char c) {
 	change_color(saved_r, saved_g, saved_b);
 }
 
-// 在指定字符格底部两行画光标条，逐像素取反
-// 取反两次严格还原，不依赖该格颜色数量
+// 在指定字符格底部两行画光标条
 void cursor_paint(int cx, int cy) {
 	if (cx < 0 || cy < 0 || (uint32_t)cx >= total_cols || (uint32_t)cy >= total_rows) {
 		return;
@@ -321,44 +341,63 @@ void cursor_paint(int cx, int cy) {
 	int px = cx * 8;
 	int py = cy * 16;
 
+	uint32_t color_a = 0;
+	uint32_t color_b = 0;
+	int count_a = 0;
+	int count_b = 0;
+
+	for (int row = 0; row < 16; row++) {
+		for (int col = 0; col < 8; col++) {
+			uint32_t c = read_pixel(px + col, py + row);
+
+			if (count_a == 0) {
+				color_a = c;
+				count_a = 1;
+			} else if (c == color_a) {
+				count_a++;
+			} else if (count_b == 0) {
+				color_b = c;
+				count_b = 1;
+			} else if (c == color_b) {
+				count_b++;
+			} else {
+				return;
+			}
+		}
+	}
+
+	if (count_b == 0) {
+		if (color_a != 0xFFFFFF) {
+			color_b = 0xFFFFFF;
+		} else {
+			color_b = 0x808080;
+		}
+	}
+
 	for (int row = 14; row < 16; row++) {
 		for (int col = 0; col < 8; col++) {
 			uint32_t c = read_pixel(px + col, py + row);
-			write_pixel(px + col, py + row, (~c) & 0xFFFFFF);
+
+			if (c == color_a) {
+				write_pixel(px + col, py + row, color_b);
+			} else if (c == color_b) {
+				write_pixel(px + col, py + row, color_a);
+			}
 		}
 	}
 }
 
-// 加锁与解锁，供 shell 模块在整行重画期间防止中断插入
-void cursor_lock(void) {
-	CURSOR_LOCK();
-}
-
-void cursor_unlock(void) {
-	CURSOR_UNLOCK();
-}
-
-// 擦掉屏上已有的光标条，把保存的原始像素写回
+// 擦掉屏上已有的光标条
 void cursor_hide(void) {
 	if (!cursor_painted) {
 		return;
 	}
 
-	int px = cursor_painted_col * 8;
-	int py = cursor_painted_row * 16;
-
-	int idx = 0;
-	for (int row = 14; row < 16; row++) {
-		for (int col = 0; col < 8; col++) {
-			write_pixel(px + col, py + row, cursor_save[idx]);
-			idx++;
-		}
-	}
-
+	cursor_paint(cursor_painted_col, cursor_painted_row);
 	cursor_painted = 0;
 }
 
-// 按当前状态在新位置画光标条，画前保存原始像素
+// 按当前状态在新位置画光标条
 void cursor_show(void) {
 	if (cursor_painted) {
 		return;
@@ -372,27 +411,9 @@ void cursor_show(void) {
 		return;
 	}
 
-	int px = cursor_col * 8;
-	int py = cursor_row * 16;
-
-	int idx = 0;
-	for (int row = 14; row < 16; row++) {
-		for (int col = 0; col < 8; col++) {
-			cursor_save[idx] = read_pixel(px + col, py + row);
-			idx++;
-		}
-	}
-
-	idx = 0;
-	for (int row = 14; row < 16; row++) {
-		for (int col = 0; col < 8; col++) {
-			write_pixel(px + col, py + row, (~cursor_save[idx]) & 0xFFFFFF);
-			idx++;
-		}
-	}
-
 	cursor_painted_col = cursor_col;
 	cursor_painted_row = cursor_row;
+	cursor_paint(cursor_col, cursor_row);
 	cursor_painted = 1;
 }
 
@@ -425,6 +446,14 @@ static void cursor_setpos(int cx, int cy) {
 
 	cursor_col = cx;
 	cursor_row = cy;
+}
+
+void cursor_lock(void) {
+	CURSOR_LOCK();
+}
+
+void cursor_unlock(void) {
+	CURSOR_UNLOCK();
 }
 
 // 移动虚拟光标到指定字符格
@@ -470,9 +499,9 @@ void scroll_screen(int lines) {
 
 	int char_pixels = lines * 16;
 	uint8_t *base = (uint8_t *)fb_addr;
-	uint32_t row_bytes = fb_pitch;
 
 	if (char_pixels > 0) {
+		uint32_t row_bytes = fb_pitch;
 		uint32_t qwords = row_bytes / 8;
 		uint32_t rem = row_bytes % 8;
 
@@ -530,8 +559,15 @@ void scroll_screen(int lines) {
 	}
 }
 
-// 打印单字符
+// 打印单字符，重定向时写入缓冲
 void print_char(char c) {
+	if (redir_active) {
+		if (redir_len < REDIR_BUF_SIZE - 1) {
+			redir_buf[redir_len++] = c;
+		}
+		return;
+	}
+
 	CURSOR_LOCK();
 	cursor_hide();
 
@@ -753,7 +789,6 @@ void pic_init(void) {
 	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)1), "d"(PIC2_DATA));
 	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)0x00), "d"((uint16_t)0x80));
 
-	// 屏蔽 IRQ1 键盘，等进入 shell 前再解除
 	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)0xFE), "d"(PIC1_DATA));
 	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)0x00), "d"((uint16_t)0x80));
 
@@ -951,6 +986,8 @@ void kernel_main(uint64_t mb2_info_addr) {
 
 	print_timestamp();
 	print("PIT initialized at 1000Hz\n");
+	delay_ms(100);
+
 	print_timestamp();
 	ext2_print_info();
 	delay_ms(100);

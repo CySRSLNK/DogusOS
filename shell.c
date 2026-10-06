@@ -26,6 +26,8 @@ int line_old_len = 0;
 const char *user = "user";
 const char *host = "host";
 
+int current_privilege = 0;
+
 char cwd[256] = "/";
 char path_buf[256] = "/";
 
@@ -36,7 +38,6 @@ int hist_count = 0;
 int hist_pos = 0;
 char hist_saved[LINE_BUF_SIZE];
 
-int current_privilege = 0;
 int last_exit_code = 0;
 
 #define ARGV_MAX 512
@@ -78,7 +79,6 @@ void build_prompt(void) {
 	prompt_buf[i] = '\0';
 }
 
-// 归一化路径，以 / 开头，不以 / 结尾（根目录除外）
 void path_normalize(const char *in, char *out, int out_size) {
 	char *stack[64];
 	int depth = 0;
@@ -148,6 +148,38 @@ void path_normalize(const char *in, char *out, int out_size) {
 	out[w] = '\0';
 }
 
+static void build_abs_path(const char *arg, char *norm, int norm_size) {
+	char joined[256];
+
+	if (arg[0] == '/') {
+		int w = 0;
+		while (arg[w] != '\0' && w < 255) {
+			joined[w] = arg[w];
+			w++;
+		}
+		joined[w] = '\0';
+	} else {
+		int w = 0;
+
+		while (cwd[w] != '\0' && w < 255) {
+			joined[w] = cwd[w];
+			w++;
+		}
+
+		if (w > 0 && joined[w - 1] != '/') {
+			joined[w++] = '/';
+		}
+
+		for (int i = 0; arg[i] != '\0' && w < 255; i++) {
+			joined[w++] = arg[i];
+		}
+
+		joined[w] = '\0';
+	}
+
+	path_normalize(joined, norm, norm_size);
+}
+
 void hist_load(int idx) {
 	int i = 0;
 
@@ -161,7 +193,6 @@ void hist_load(int idx) {
 	line_cursor = i;
 }
 
-// 在历史位置编辑后，把编辑结果覆盖到 saved，pos 回最新
 static void hist_edit_to_saved(void) {
 	hist_pos = hist_count;
 
@@ -248,7 +279,6 @@ void redraw_line(void) {
 	cursor_unlock();
 }
 
-// 输出报错，格式为 来源: 报错信息[: 具体内容]
 void print_error(const char *source, const char *msg, const char *detail) {
 	print(source);
 	print(": ");
@@ -640,11 +670,67 @@ void handle_command(char *line) {
 		return;
 	}
 
-	int eargc = expand_glob(argc, argv, expanded_argv);
+	const char *redir_file = 0;
+	int redir_append = 0;
+	int redir_index = -1;
+
+	for (int i = 0; i < argc; i++) {
+		if (strcmp(argv[i], ">") == 0 || strcmp(argv[i], ">>") == 0) {
+			if (i + 1 >= argc) {
+				print_error("dogus", "syntax error", "unexpected end of line");
+				last_exit_code = 1;
+				return;
+			}
+
+			if (strcmp(argv[i], ">>") == 0) {
+				redir_append = 1;
+			} else {
+				redir_append = 0;
+			}
+
+			redir_file = argv[i + 1];
+			redir_index = i;
+			break;
+		}
+	}
+
+	int new_argc = argc;
+
+	if (redir_index >= 0) {
+		new_argc = redir_index;
+	}
+
+	int eargc = expand_glob(new_argc, argv, expanded_argv);
+
+	if (eargc == 0) {
+		return;
+	}
 
 	for (int i = 0; i < command_count; i++) {
 		if (strcmp(expanded_argv[0], commands[i].name) == 0) {
-			last_exit_code = commands[i].func(eargc - 1, expanded_argv + 1, current_privilege);
+			int ret;
+
+			if (redir_file != 0) {
+				redir_begin();
+				ret = commands[i].func(eargc - 1, expanded_argv + 1, current_privilege);
+
+				int len = 0;
+				const char *data = redir_end(&len);
+
+				char norm[256];
+				build_abs_path(redir_file, norm, 256);
+
+				int r = ext2_write_file(norm, data, (uint32_t)len, redir_append);
+
+				if (r != 0) {
+					print_error("dogus", "cannot write", redir_file);
+					ret = 1;
+				}
+			} else {
+				ret = commands[i].func(eargc - 1, expanded_argv + 1, current_privilege);
+			}
+
+			last_exit_code = ret;
 			return;
 		}
 	}

@@ -55,9 +55,14 @@ char get_key(void);
 void disk_init(void);
 int disk_read_sectors(uint32_t lba, uint8_t count, void *buf);
 int disk_write_sectors(uint32_t lba, uint8_t count, const void *buf);
+
 void ext2_init(void);
 void ext2_print_info(void);
 void ext2_ls_root(void);
+
+int redir_is_active(void);
+void redir_begin(void);
+const char *redir_end(int *len);
 
 int strcmp(const char *a, const char *b);
 

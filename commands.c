@@ -30,9 +30,42 @@ struct cmd commands[] = {
 	{"true", cmd_true, str_cmd_true_summary, str_cmd_true_detail},
 	{"uptime", cmd_uptime, str_cmd_uptime_summary, str_cmd_uptime_detail},
 	{"whoami", cmd_whoami, str_cmd_whoami_summary, str_cmd_whoami_detail},
+	{"write", cmd_write, str_cmd_write_summary, str_cmd_write_detail},
 };
 
 int command_count = sizeof(commands) / sizeof(commands[0]);
+
+static void build_abs_path(const char *arg, char *norm, int norm_size) {
+	char joined[256];
+
+	if (arg[0] == '/') {
+		int w = 0;
+		while (arg[w] != '\0' && w < 255) {
+			joined[w] = arg[w];
+			w++;
+		}
+		joined[w] = '\0';
+	} else {
+		int w = 0;
+
+		while (cwd[w] != '\0' && w < 255) {
+			joined[w] = cwd[w];
+			w++;
+		}
+
+		if (w > 0 && joined[w - 1] != '/') {
+			joined[w++] = '/';
+		}
+
+		for (int i = 0; arg[i] != '\0' && w < 255; i++) {
+			joined[w++] = arg[i];
+		}
+
+		joined[w] = '\0';
+	}
+
+	path_normalize(joined, norm, norm_size);
+}
 
 int cmd_cat(int argc, char **argv, int privilege) {
 	if (check_permission("cat", 0, privilege)) {
@@ -40,32 +73,8 @@ int cmd_cat(int argc, char **argv, int privilege) {
 			int ret = 0;
 
 			for (int i = 0; i < argc; i++) {
-				char joined[256];
 				char norm[256];
-				const char *target;
-
-				if (argv[i][0] == '/') {
-					target = argv[i];
-				} else {
-					int w = 0;
-
-					for (int j = 0; cwd[j] != '\0' && w < 255; j++) {
-						joined[w++] = cwd[j];
-					}
-
-					if (w > 0 && joined[w - 1] != '/') {
-						joined[w++] = '/';
-					}
-
-					for (int j = 0; argv[i][j] != '\0' && w < 255; j++) {
-						joined[w++] = argv[i][j];
-					}
-
-					joined[w] = '\0';
-					target = joined;
-				}
-
-				path_normalize(target, norm, 256);
+				build_abs_path(argv[i], norm, 256);
 
 				int r = ext2_cat(norm);
 
@@ -88,38 +97,17 @@ int cmd_cat(int argc, char **argv, int privilege) {
 int cmd_cd(int argc, char **argv, int privilege) {
 	if (check_permission("cd", 0, privilege)) {
 		if (check_argc("cd", 0, 1, argc)) {
-			const char *target;
 			const char *display;
-			char joined[256];
 			char norm[256];
 
 			if (argc == 0) {
-				target = "/";
 				display = "/";
-			} else if (argv[0][0] == '/') {
-				target = argv[0];
-				display = argv[0];
+				norm[0] = '/';
+				norm[1] = '\0';
 			} else {
-				int w = 0;
-
-				for (int i = 0; cwd[i] != '\0' && w < 255; i++) {
-					joined[w++] = cwd[i];
-				}
-
-				if (w > 0 && joined[w - 1] != '/') {
-					joined[w++] = '/';
-				}
-
-				for (int i = 0; argv[0][i] != '\0' && w < 255; i++) {
-					joined[w++] = argv[0][i];
-				}
-
-				joined[w] = '\0';
-				target = joined;
 				display = argv[0];
+				build_abs_path(argv[0], norm, 256);
 			}
-
-			path_normalize(target, norm, 256);
 
 			uint32_t ino;
 
@@ -170,15 +158,37 @@ int cmd_clear(int argc, char **argv, int privilege) {
 int cmd_echo(int argc, char **argv, int privilege) {
 	if (check_permission("echo", 0, privilege)) {
 		if (check_argc("echo", 0, -1, argc)) {
-			for (int i = 0; i < argc; i++) {
-				if (i > 0) {
+			int newline = 1;
+			int start = 0;
+
+			if (argc > 0 && argv[0][0] == '-' && argv[0][1] != '\0') {
+				int all_n = 1;
+
+				for (int j = 1; argv[0][j] != '\0'; j++) {
+					if (argv[0][j] != 'n' && argv[0][j] != 'N') {
+						all_n = 0;
+						break;
+					}
+				}
+
+				if (all_n) {
+					newline = 0;
+					start = 1;
+				}
+			}
+
+			for (int i = start; i < argc; i++) {
+				if (i > start) {
 					print_char(' ');
 				}
 
 				print(argv[i]);
 			}
 
-			print_char('\n');
+			if (newline) {
+				print_char('\n');
+			}
+
 			return 0;
 		}
 	}
@@ -300,38 +310,22 @@ int cmd_ls(int argc, char **argv, int privilege) {
 				return 1;
 			}
 
-			char joined[256];
 			char norm[256];
-			const char *target;
 			const char *display;
 
 			if (path == 0) {
-				target = cwd;
 				display = ".";
-			} else if (path[0] == '/') {
-				target = path;
-				display = path;
+				for (int i = 0; i < 256; i++) {
+					norm[i] = cwd[i];
+
+					if (cwd[i] == '\0') {
+						break;
+					}
+				}
 			} else {
-				int w = 0;
-
-				for (int i = 0; cwd[i] != '\0' && w < 255; i++) {
-					joined[w++] = cwd[i];
-				}
-
-				if (w > 0 && joined[w - 1] != '/') {
-					joined[w++] = '/';
-				}
-
-				for (int i = 0; path[i] != '\0' && w < 255; i++) {
-					joined[w++] = path[i];
-				}
-
-				joined[w] = '\0';
-				target = joined;
 				display = path;
+				build_abs_path(path, norm, 256);
 			}
-
-			path_normalize(target, norm, 256);
 
 			uint32_t ino;
 
@@ -362,28 +356,8 @@ int cmd_mkdir(int argc, char **argv, int privilege) {
 			int ret = 0;
 
 			for (int i = 0; i < argc; i++) {
-				char joined[256];
 				char norm[256];
-				const char *target;
-
-				if (argv[i][0] == '/') {
-					target = argv[i];
-				} else {
-					int w = 0;
-					for (int j = 0; cwd[j] != '\0' && w < 255; j++) {
-						joined[w++] = cwd[j];
-					}
-					if (w > 0 && joined[w - 1] != '/') {
-						joined[w++] = '/';
-					}
-					for (int j = 0; argv[i][j] != '\0' && w < 255; j++) {
-						joined[w++] = argv[i][j];
-					}
-					joined[w] = '\0';
-					target = joined;
-				}
-
-				path_normalize(target, norm, 256);
+				build_abs_path(argv[i], norm, 256);
 
 				int r = ext2_mkdir(norm);
 
@@ -464,28 +438,8 @@ int cmd_rm(int argc, char **argv, int privilege) {
 					continue;
 				}
 
-				char joined[256];
 				char norm[256];
-				const char *target;
-
-				if (argv[i][0] == '/') {
-					target = argv[i];
-				} else {
-					int w = 0;
-					for (int j = 0; cwd[j] != '\0' && w < 255; j++) {
-						joined[w++] = cwd[j];
-					}
-					if (w > 0 && joined[w - 1] != '/') {
-						joined[w++] = '/';
-					}
-					for (int j = 0; argv[i][j] != '\0' && w < 255; j++) {
-						joined[w++] = argv[i][j];
-					}
-					joined[w] = '\0';
-					target = joined;
-				}
-
-				path_normalize(target, norm, 256);
+				build_abs_path(argv[i], norm, 256);
 
 				int r = ext2_remove(norm, recursive);
 
@@ -521,28 +475,8 @@ int cmd_rmdir(int argc, char **argv, int privilege) {
 			int ret = 0;
 
 			for (int i = 0; i < argc; i++) {
-				char joined[256];
 				char norm[256];
-				const char *target;
-
-				if (argv[i][0] == '/') {
-					target = argv[i];
-				} else {
-					int w = 0;
-					for (int j = 0; cwd[j] != '\0' && w < 255; j++) {
-						joined[w++] = cwd[j];
-					}
-					if (w > 0 && joined[w - 1] != '/') {
-						joined[w++] = '/';
-					}
-					for (int j = 0; argv[i][j] != '\0' && w < 255; j++) {
-						joined[w++] = argv[i][j];
-					}
-					joined[w] = '\0';
-					target = joined;
-				}
-
-				path_normalize(target, norm, 256);
+				build_abs_path(argv[i], norm, 256);
 
 				int r = ext2_rmdir(norm);
 
@@ -571,32 +505,8 @@ int cmd_rmdir(int argc, char **argv, int privilege) {
 int cmd_stat(int argc, char **argv, int privilege) {
 	if (check_permission("stat", 0, privilege)) {
 		if (check_argc("stat", 1, 1, argc)) {
-			char joined[256];
 			char norm[256];
-			const char *target;
-
-			if (argv[0][0] == '/') {
-				target = argv[0];
-			} else {
-				int w = 0;
-
-				for (int i = 0; cwd[i] != '\0' && w < 255; i++) {
-					joined[w++] = cwd[i];
-				}
-
-				if (w > 0 && joined[w - 1] != '/') {
-					joined[w++] = '/';
-				}
-
-				for (int i = 0; argv[0][i] != '\0' && w < 255; i++) {
-					joined[w++] = argv[0][i];
-				}
-
-				joined[w] = '\0';
-				target = joined;
-			}
-
-			path_normalize(target, norm, 256);
+			build_abs_path(argv[0], norm, 256);
 
 			uint32_t ino;
 
@@ -673,133 +583,37 @@ int cmd_sudo(int argc, char **argv, int privilege) {
 	return 1;
 }
 
-// 从绝对路径拆出父目录与文件名，成功返回 0
-static int split_abs_path(const char *path, char *parent, char *name) {
-	int len = 0;
-	while (path[len] != '\0') {
-		len++;
-	}
-
-	if (len < 2 || path[0] != '/') {
-		return -1;
-	}
-
-	int slash = -1;
-	for (int i = len - 1; i >= 1; i--) {
-		if (path[i] == '/') {
-			slash = i;
-			break;
-		}
-	}
-
-	if (slash == -1) {
-		parent[0] = '/';
-		parent[1] = '\0';
-
-		int k = 0;
-		for (int i = 1; i < len; i++) {
-			name[k++] = path[i];
-		}
-		name[k] = '\0';
-	} else {
-		for (int i = 0; i < slash; i++) {
-			parent[i] = path[i];
-		}
-		parent[slash] = '\0';
-
-		int k = 0;
-		for (int i = slash + 1; i < len; i++) {
-			name[k++] = path[i];
-		}
-		name[k] = '\0';
-	}
-
-	return 0;
-}
-
 int cmd_touch(int argc, char **argv, int privilege) {
 	if (check_permission("touch", 0, privilege)) {
 		if (check_argc("touch", 1, -1, argc)) {
 			int ret = 0;
 
 			for (int i = 0; i < argc; i++) {
-				char joined[256];
 				char norm[256];
-				const char *target;
-
-				if (argv[i][0] == '/') {
-					target = argv[i];
-				} else {
-					int w = 0;
-					for (int j = 0; cwd[j] != '\0' && w < 255; j++) {
-						joined[w++] = cwd[j];
-					}
-					if (w > 0 && joined[w - 1] != '/') {
-						joined[w++] = '/';
-					}
-					for (int j = 0; argv[i][j] != '\0' && w < 255; j++) {
-						joined[w++] = argv[i][j];
-					}
-					joined[w] = '\0';
-					target = joined;
-				}
-
-				path_normalize(target, norm, 256);
+				build_abs_path(argv[i], norm, 256);
 
 				uint32_t existing;
 				if (ext2_lookup(norm, &existing) == 0) {
 					continue;
 				}
 
-				char parent[256];
-				char name[256];
+				int r = ext2_write_file(norm, "", 0, 0);
 
-				if (split_abs_path(norm, parent, name) != 0) {
+				if (r == -1) {
 					print_error("touch", str_msg_noent, argv[i]);
 					ret = 1;
-					continue;
-				}
-
-				uint32_t parent_ino;
-
-				if (ext2_lookup(parent, &parent_ino) != 0) {
+				} else if (r == -2) {
 					print_error("touch", str_msg_noent, argv[i]);
 					ret = 1;
-					continue;
-				}
-
-				struct ext2_inode pino;
-				ext2_read_inode(parent_ino, &pino);
-
-				if ((pino.i_mode & 0xF000) != 0x4000) {
+				} else if (r == -3) {
 					print_error("touch", str_msg_notdir, argv[i]);
 					ret = 1;
-					continue;
-				}
-
-				uint32_t new_ino = ext2_alloc_inode();
-
-				if (new_ino == 0) {
+				} else if (r == -4) {
+					print_error("touch", str_msg_isdir, argv[i]);
+					ret = 1;
+				} else if (r == -5) {
 					print_error("touch", str_msg_nospace, argv[i]);
 					ret = 1;
-					continue;
-				}
-
-				struct ext2_inode new_inode;
-				for (uint32_t j = 0; j < sizeof(struct ext2_inode); j++) {
-					((uint8_t *)&new_inode)[j] = 0;
-				}
-
-				new_inode.i_mode = 0x81A4;
-				new_inode.i_size = 0;
-				new_inode.i_links_count = 1;
-
-				ext2_write_inode(new_ino, &new_inode);
-
-				if (ext2_add_dir_entry(parent_ino, new_ino, name, 1) != 0) {
-					print_error("touch", str_msg_nospace, argv[i]);
-					ret = 1;
-					continue;
 				}
 			}
 
@@ -813,38 +627,22 @@ int cmd_touch(int argc, char **argv, int privilege) {
 int cmd_tree(int argc, char **argv, int privilege) {
 	if (check_permission("tree", 0, privilege)) {
 		if (check_argc("tree", 0, 1, argc)) {
-			char joined[256];
 			char norm[256];
-			const char *target;
 			const char *display;
 
 			if (argc == 0) {
-				target = cwd;
 				display = ".";
-			} else if (argv[0][0] == '/') {
-				target = argv[0];
-				display = argv[0];
+				for (int i = 0; i < 256; i++) {
+					norm[i] = cwd[i];
+
+					if (cwd[i] == '\0') {
+						break;
+					}
+				}
 			} else {
-				int w = 0;
-
-				for (int i = 0; cwd[i] != '\0' && w < 255; i++) {
-					joined[w++] = cwd[i];
-				}
-
-				if (w > 0 && joined[w - 1] != '/') {
-					joined[w++] = '/';
-				}
-
-				for (int i = 0; argv[0][i] != '\0' && w < 255; i++) {
-					joined[w++] = argv[0][i];
-				}
-
-				joined[w] = '\0';
-				target = joined;
 				display = argv[0];
+				build_abs_path(argv[0], norm, 256);
 			}
-
-			path_normalize(target, norm, 256);
 
 			uint32_t ino;
 
@@ -928,6 +726,94 @@ int cmd_whoami(int argc, char **argv, int privilege) {
 			print(user);
 			print_char('\n');
 			return 0;
+		}
+	}
+
+	return 1;
+}
+
+int cmd_write(int argc, char **argv, int privilege) {
+	if (check_permission("write", 0, privilege)) {
+		if (check_argc("write", 1, -1, argc)) {
+			int append = 0;
+			int newline = 1;
+			int start = 0;
+
+			for (int i = 0; i < argc; i++) {
+				if (argv[i][0] == '-' && argv[i][1] != '\0') {
+					int all_valid = 1;
+
+					for (int j = 1; argv[i][j] != '\0'; j++) {
+						if (argv[i][j] == 'a' || argv[i][j] == 'A') {
+							append = 1;
+						} else if (argv[i][j] == 'n' || argv[i][j] == 'N') {
+							newline = 0;
+						} else {
+							all_valid = 0;
+							break;
+						}
+					}
+
+					if (all_valid) {
+						start = i + 1;
+						continue;
+					}
+
+					print_error("write", str_msg_invalid_option, argv[i]);
+					return 1;
+				}
+
+				start = i;
+				break;
+			}
+
+			if (start >= argc) {
+				print_error("write", str_msg_too_few, 0);
+				return 1;
+			}
+
+			const char *file = argv[start];
+			char norm[256];
+			build_abs_path(file, norm, 256);
+
+			static char buf[49152];
+			int w = 0;
+
+			for (int i = start + 1; i < argc; i++) {
+				if (i > start + 1) {
+					if (w < 49150) {
+						buf[w++] = ' ';
+					}
+				}
+
+				for (int j = 0; argv[i][j] != '\0' && w < 49150; j++) {
+					buf[w++] = argv[i][j];
+				}
+			}
+
+			if (newline) {
+				buf[w++] = '\n';
+			}
+
+			int r = ext2_write_file(norm, buf, (uint32_t)w, append);
+
+			if (r == 0) {
+				return 0;
+			}
+
+			if (r == -1) {
+				print_error("write", str_msg_noent, file);
+			} else if (r == -2) {
+				print_error("write", str_msg_noent, file);
+			} else if (r == -3) {
+				print_error("write", str_msg_notdir, file);
+			} else if (r == -4) {
+				print_error("write", str_msg_isdir, file);
+			} else {
+				print_error("write", str_msg_nospace, file);
+			}
+
+			return 1;
 		}
 	}
 
