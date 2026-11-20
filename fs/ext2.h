@@ -43,4 +43,8 @@ int ext2_list_names(uint32_t ino, char names[][256], int max);
 int ext2_read_file(const char *path, char *buffer, uint32_t max);
 int ext2_write_file(const char *path, const char *data, uint32_t len, int append);
 
+int ext2_check_perm(const struct ext2_inode *inode, int need, int owner_ok);
+int ext2_lookup_parent(const char *path, uint32_t *parent_ino, char *name);
+void ext2_perm_str(uint16_t mode, char *buf);
+
 #endif

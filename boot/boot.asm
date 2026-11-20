@@ -1,4 +1,5 @@
 ; DogusOS 引导汇编，Multiboot 2 头部与 32 位到 64 位长模式切换
+; GDT 含内核段、用户段与 TSS 描述符，TSS 描述符由 C 代码运行时填写
 ; 汇编器：NASM，输出 ELF64
 
 MB2_MAGIC	equ 0xE85250D6
@@ -36,17 +37,38 @@ multiboot2_header_end:
 
 section .bss
 align 4096
+global pml4_table
 pml4_table:
 	resb 4096
+global pdpt_table
 pdpt_table:
 	resb 4096 * 4
+global pd_table
 pd_table:
 	resb 4096 * 4
 
 align 16
+global stack_bottom
 stack_bottom:
 	resb 16384
+global stack_top
 stack_top:
+
+section .data
+align 8
+global gdt64
+gdt64:
+	dq 0x0000000000000000		; 0x00 null
+	dq 0x00209A0000000000		; 0x08 内核代码，DPL 0
+	dq 0x0000920000000000		; 0x10 内核数据，DPL 0
+	dq 0x00CFF2000000FFFF		; 0x18 用户数据，DPL 3
+	dq 0x00AFFA000000FFFF		; 0x20 用户代码，DPL 3
+	dq 0x0000000000000000		; 0x28 TSS 低 8 字节，运行时填
+	dq 0x0000000000000000		; 0x30 TSS 高 8 字节，运行时填
+
+gdt64_pointer:
+	dw gdt64_pointer - gdt64 - 1
+	dq gdt64
 
 section .text
 bits 32
@@ -115,7 +137,6 @@ long_mode_entry:
 	mov ss, ax
 	mov rsp, stack_top
 	mov rbp, rsp
-	mov rdi, rdi
 	call kernel_main
 
 .hang:
@@ -179,13 +200,3 @@ isr33:
 	pop rax
 
 	iretq
-
-section .rodata
-align 8
-gdt64:
-	dq 0
-	dq 0x00209A0000000000
-	dq 0x0000920000000000
-gdt64_pointer:
-	dw gdt64_pointer - gdt64 - 1
-	dq gdt64

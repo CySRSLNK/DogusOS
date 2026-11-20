@@ -21,6 +21,11 @@ extern uint64_t cursor_blink_next;
 #define CURSOR_BLINK_MS	200
 
 extern volatile uint64_t ticks;
+extern volatile uint64_t counter_a;
+extern volatile uint64_t counter_b;
+
+extern uint32_t current_euid;
+extern uint32_t current_egid;
 
 void change_color(unsigned char r, unsigned char g, unsigned char b);
 void change_fg(unsigned char r, unsigned char g, unsigned char b);
@@ -46,11 +51,17 @@ void clear_screen(void);
 void print_char(char c);
 void print(const char *s);
 void print_uint(uint32_t n);
+void print_hex(uint64_t n);
 void print_timestamp(void);
 
 void delay_ms(uint32_t ms);
+uint32_t rtc_get_unix_time(void);
 
 char get_key(void);
+extern volatile int ctrl_c_hit;
+void ctrl_c_reset(void);
+int key_check_ctrl_c(void);
+void key_queue_clear(void);
 
 void disk_init(void);
 int disk_read_sectors(uint32_t lba, uint8_t count, void *buf);

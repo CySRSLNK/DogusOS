@@ -4,7 +4,16 @@
 #include "shell.h"
 #include "commands.h"
 #include "ext2.h"
+#include "login.h"
 #include "font.h"
+#include "version.h"
+#include "pmm.h"
+#include "tss.h"
+#include "syscall.h"
+#include "user_test.h"
+#include "task.h"
+#include "vmm.h"
+#include "user_prog.h"
 
 // 字符到 font8x16 下标的映射表，顺序为小写、大写、数字、标点
 static const char char_map[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ,./;'[]\\`-=<>?:\"{}|~!@#$%^&*()_+";
@@ -98,6 +107,10 @@ volatile char key_buf[KEY_BUF_SIZE];
 volatile int key_head = 0;
 volatile int key_tail = 0;
 
+// Ctrl+C 状态
+volatile int ctrl_c_hit = 0;
+static int ctrl_c_echo_done = 0;
+
 // 重定向状态
 #define REDIR_BUF_SIZE	65536
 
@@ -184,6 +197,13 @@ struct mb2_tag_framebuffer {
 	uint8_t framebuffer_type;
 	uint16_t reserved;
 };
+
+// Multiboot2 内存映射标签
+#define MB2_TAG_TYPE_MMAP	6
+
+// 解析结果，供 pmm_init 使用
+static uint64_t mb2_mmap_addr = 0;
+static uint32_t mb2_mmap_size = 0;
 
 // IDT 项结构
 struct idt_entry {
@@ -559,8 +579,51 @@ void scroll_screen(int lines) {
 	}
 }
 
-// 打印单字符，重定向时写入缓冲
+// Ctrl+C 回显标志复位
+void ctrl_c_reset(void) {
+	ctrl_c_echo_done = 0;
+}
+
+// 扫按键队列，查 Ctrl+C，命中则清队列并置标志
+int key_check_ctrl_c(void) {
+	int i = key_tail;
+
+	while (i != key_head) {
+		if (key_buf[i] == 0x0C) {
+			key_head = 0;
+			key_tail = 0;
+			ctrl_c_hit = 1;
+			return 1;
+		}
+
+		i = (i + 1) % KEY_BUF_SIZE;
+	}
+
+	return 0;
+}
+
+// 打印单字符，重定向时写入缓冲，Ctrl+C 时中断
 void print_char(char c) {
+	if (ctrl_c_hit) {
+		if (!ctrl_c_echo_done) {
+			ctrl_c_echo_done = 1;
+
+			if (!redir_active) {
+				ctrl_c_hit = 0;
+				print_char('^');
+				print_char('C');
+				print_char('\n');
+				ctrl_c_hit = 1;
+			}
+		}
+
+		return;
+	}
+
+	if (key_check_ctrl_c()) {
+		return;
+	}
+
 	if (redir_active) {
 		if (redir_len < REDIR_BUF_SIZE - 1) {
 			redir_buf[redir_len++] = c;
@@ -642,6 +705,18 @@ void print_uint(uint32_t n) {
 
 	while (i > 0) {
 		print_char(buf[--i]);
+	}
+}
+
+// 打印 64 位十六进制，固定 16 位数字，加 0x 前缀
+void print_hex(uint64_t n) {
+	static const char hex[] = "0123456789abcdef";
+
+	print_char('0');
+	print_char('x');
+
+	for (int i = 60; i >= 0; i -= 4) {
+		print_char(hex[(n >> i) & 0xF]);
 	}
 }
 
@@ -731,6 +806,12 @@ void parse_multiboot2(uint64_t mb2_info_addr) {
 			fb_pitch = fb->framebuffer_pitch;
 		}
 
+		if (tag->type == MB2_TAG_TYPE_MMAP) {
+			uint8_t *raw = (uint8_t *)tag_ptr;
+			mb2_mmap_addr = (uint64_t)(uintptr_t)(raw + 16);
+			mb2_mmap_size = tag->size - 16;
+		}
+
 		tag_ptr += (tag->size + 7) & ~7;
 	}
 }
@@ -748,8 +829,47 @@ void idt_set_gate(int n, uint64_t handler) {
 
 // 初始化 IDT，加载到 CPU
 void idt_init(void) {
+	extern void isr0(void);
+	extern void isr1(void);
+	extern void isr2(void);
+	extern void isr3(void);
+	extern void isr4(void);
+	extern void isr5(void);
+	extern void isr6(void);
+	extern void isr7(void);
+	extern void isr8(void);
+	extern void isr9(void);
+	extern void isr10(void);
+	extern void isr11(void);
+	extern void isr12(void);
+	extern void isr13(void);
+	extern void isr14(void);
+	extern void isr15(void);
+	extern void isr16(void);
+	extern void isr17(void);
+	extern void isr18(void);
+	extern void isr19(void);
+	extern void isr20(void);
+	extern void isr21(void);
+	extern void isr22(void);
+	extern void isr23(void);
+	extern void isr24(void);
+	extern void isr25(void);
+	extern void isr26(void);
+	extern void isr27(void);
+	extern void isr28(void);
+	extern void isr29(void);
+	extern void isr30(void);
+	extern void isr31(void);
 	extern void isr32(void);
 	extern void isr33(void);
+
+	void (*exceptions[32])(void) = {
+		isr0, isr1, isr2, isr3, isr4, isr5, isr6, isr7,
+		isr8, isr9, isr10, isr11, isr12, isr13, isr14, isr15,
+		isr16, isr17, isr18, isr19, isr20, isr21, isr22, isr23,
+		isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31
+	};
 
 	idtp.limit = sizeof(idt) - 1;
 	idtp.base = (uint64_t)&idt;
@@ -758,6 +878,11 @@ void idt_init(void) {
 		idt_set_gate(i, (uint64_t)isr32);
 	}
 
+	for (int i = 0; i < 32; i++) {
+		idt_set_gate(i, (uint64_t)exceptions[i]);
+	}
+
+	idt_set_gate(32, (uint64_t)isr32);
 	idt_set_gate(33, (uint64_t)isr33);
 
 	__asm__ volatile ("lidt %0" : : "m"(idtp));
@@ -810,16 +935,28 @@ void pit_init(void) {
 	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)((divisor >> 8) & 0xFF)), "d"(PIT_CHANNEL0));
 }
 
-// PIT 中断处理，每毫秒一次
+// PIT 中断处理，每毫秒一次，10ms 时间片后触发调度
 void timer_handler(void) {
 	ticks++;
 
 	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)0x20), "d"(PIC1_COMMAND));
+
+	task_wake_check();
+
+	static int slice = 0;
+
+	slice++;
+
+	if (slice >= 10) {
+		slice = 0;
+		schedule();
+	}
 }
 
 // 键盘中断处理
 void keyboard_handler(void) {
 	static int extended = 0;
+	static int ctrl_pressed = 0;
 
 	uint8_t scancode = 0;
 
@@ -827,6 +964,20 @@ void keyboard_handler(void) {
 
 	if (scancode == 0xE0) {
 		extended = 1;
+
+		__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)0x20), "d"(PIC1_COMMAND));
+		return;
+	}
+
+	if (scancode == 0x1D) {
+		ctrl_pressed = 1;
+
+		__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)0x20), "d"(PIC1_COMMAND));
+		return;
+	}
+
+	if (scancode == 0x9D) {
+		ctrl_pressed = 0;
 
 		__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)0x20), "d"(PIC1_COMMAND));
 		return;
@@ -881,18 +1032,26 @@ void keyboard_handler(void) {
 			}
 		}
 	} else if (scancode < 0x80) {
-		c = shift_pressed ? scancode_map_shift[scancode] : scancode_map[scancode];
+		if (ctrl_pressed) {
+			if (scancode == 0x26) {
+				c = 0x0B;
+			} else if (scancode == 0x2E) {
+				c = 0x0C;
+			}
+		} else {
+			c = shift_pressed ? scancode_map_shift[scancode] : scancode_map[scancode];
 
-		if (c >= 'a' && c <= 'z' && caps_lock_on) {
-			c = c - 'a' + 'A';
-		} else if (c >= 'A' && c <= 'Z' && caps_lock_on) {
-			c = c - 'A' + 'a';
-		}
+			if (c >= 'a' && c <= 'z' && caps_lock_on) {
+				c = c - 'a' + 'A';
+			} else if (c >= 'A' && c <= 'Z' && caps_lock_on) {
+				c = c - 'A' + 'a';
+			}
 
-		if (scancode == 0x1C) {
-			c = '\n';
-		} else if (scancode == 0x0E) {
-			c = '\b';
+			if (scancode == 0x1C) {
+				c = '\n';
+			} else if (scancode == 0x0E) {
+				c = '\b';
+			}
 		}
 	}
 
@@ -920,6 +1079,12 @@ char get_key(void) {
 	return c;
 }
 
+// 清空按键队列
+void key_queue_clear(void) {
+	key_head = 0;
+	key_tail = 0;
+}
+
 // 毫秒级延时
 void delay_ms(uint32_t ms) {
 	uint64_t start = ticks;
@@ -927,6 +1092,123 @@ void delay_ms(uint32_t ms) {
 	while (ticks - start < ms) {
 		__asm__ volatile ("hlt");
 	}
+}
+
+// CMOS 端口，用于读取 RTC 实时时钟
+#define CMOS_INDEX	0x70
+#define CMOS_DATA	0x71
+
+// 读一个 CMOS 寄存器，bit7 置位顺带关闭 NMI
+static uint8_t cmos_read(uint8_t reg) {
+	__asm__ volatile ("outb %%al, %%dx" : : "a"((uint8_t)(reg | 0x80)),
+			  "d"((uint16_t)CMOS_INDEX));
+
+	uint8_t v;
+
+	__asm__ volatile ("inb %%dx, %%al" : "=a"(v)
+			  : "d"((uint16_t)CMOS_DATA));
+	return v;
+}
+
+// 等待 RTC 更新周期结束，最多等一百万次避免死循环
+static void rtc_wait_ready(void) {
+	for (int i = 0; i < 1000000; i++) {
+		uint8_t v = cmos_read(0x0A);
+
+		if (!(v & 0x80)) {
+			return;
+		}
+	}
+}
+
+// BCD 转二进制
+static uint8_t bcd_to_bin(uint8_t v) {
+	return (uint8_t)((v & 0x0F) + ((v >> 4) * 10));
+}
+
+// 判断闰年
+static int is_leap_year(int y) {
+	return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+}
+
+// 从 1970-01-01 到指定年月日的天数
+static uint32_t days_since_epoch(int year, int month, int day) {
+	static const int month_days[12] = {
+		31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+	};
+
+	uint32_t days = 0;
+
+	for (int y = 1970; y < year; y++) {
+		days += is_leap_year(y) ? 366 : 365;
+	}
+
+	for (int m = 1; m < month; m++) {
+		days += month_days[m - 1];
+
+		if (m == 2 && is_leap_year(year)) {
+			days++;
+		}
+	}
+
+	days += day - 1;
+	return days;
+}
+
+// 读 RTC，返回 Unix 纪元秒数，读不到有效值返回 0
+uint32_t rtc_get_unix_time(void) {
+	rtc_wait_ready();
+
+	uint8_t sec = cmos_read(0x00);
+	uint8_t min = cmos_read(0x02);
+	uint8_t hour = cmos_read(0x04);
+	uint8_t day = cmos_read(0x07);
+	uint8_t month = cmos_read(0x08);
+	uint8_t year = cmos_read(0x09);
+	uint8_t regb = cmos_read(0x0B);
+
+	int pm = 0;
+
+	if (!(regb & 0x02)) {
+		pm = (hour & 0x80) ? 1 : 0;
+		hour &= 0x7F;
+	}
+
+	if (!(regb & 0x04)) {
+		sec = bcd_to_bin(sec);
+		min = bcd_to_bin(min);
+		hour = bcd_to_bin(hour);
+		day = bcd_to_bin(day);
+		month = bcd_to_bin(month);
+		year = bcd_to_bin(year);
+	}
+
+	if (!(regb & 0x02)) {
+		if (pm && hour != 12) {
+			hour += 12;
+		}
+
+		if (!pm && hour == 12) {
+			hour = 0;
+		}
+	}
+
+	if (month < 1 || month > 12 || day < 1 || day > 31) {
+		return 0;
+	}
+
+	if (hour > 23 || min > 59 || sec > 59) {
+		return 0;
+	}
+
+	int full_year = 2000 + year;
+	uint32_t days = days_since_epoch(full_year, month, day);
+	uint32_t t = days * 86400u;
+
+	t += (uint32_t)hour * 3600u;
+	t += (uint32_t)min * 60u;
+	t += sec;
+	return t;
 }
 
 // 内核入口，由 boot.asm 调用
@@ -951,7 +1233,7 @@ void kernel_main(uint64_t mb2_info_addr) {
 	uint32_t passwd_ino;
 
 	if (ext2_lookup("/etc/passwd", &passwd_ino) != 0) {
-		const char *init = "root:x:0:0\nuser:x:1000:1000\n";
+		const char *init = "root:x:0:0::/root:\n";
 		uint32_t n = 0;
 
 		while (init[n] != '\0') {
@@ -961,21 +1243,66 @@ void kernel_main(uint64_t mb2_info_addr) {
 		ext2_write_file("/etc/passwd", init, n, 0);
 	}
 
+	uint32_t hostname_ino;
+
+	if (ext2_lookup("/etc/hostname", &hostname_ino) != 0) {
+		const char *init = "dogus\n";
+		uint32_t n = 0;
+
+		while (init[n] != '\0') {
+			n++;
+		}
+
+		ext2_write_file("/etc/hostname", init, n, 0);
+	}
+
+	uint32_t shadow_ino;
+
+	if (ext2_lookup("/etc/shadow", &shadow_ino) != 0) {
+		const char *init = "root::\n";
+		uint32_t n = 0;
+
+		while (init[n] != '\0') {
+			n++;
+		}
+
+		ext2_write_file("/etc/shadow", init, n, 0);
+	}
+
+	uint32_t home_ino;
+
+	if (ext2_lookup("/home", &home_ino) != 0) {
+		ext2_mkdir("/home");
+	}
+
+	uint32_t root_home_ino;
+
+	if (ext2_lookup("/root", &root_home_ino) != 0) {
+		ext2_mkdir("/root");
+	}
+
 	__asm__ volatile ("sti");
 
 	clear_screen();
 
 	print_timestamp();
-	print("DogusOS v0.1\n");
-	delay_ms(100);
+	print(OS_NAME);
+	print_char(' ');
+	print(OS_VERSION);
+	print_char('\n');
+	delay_ms(75);
 
 	print_timestamp();
-	print("Arch: x86_64\n");
-	delay_ms(100);
+	print("Arch: ");
+	print(OS_ARCH);
+	print_char('_');
+	print(OS_BITS);
+	print_char('\n');
+	delay_ms(75);
 
 	print_timestamp();
 	print("Multiboot2 info parsed\n");
-	delay_ms(100);
+	delay_ms(75);
 
 	print_timestamp();
 	print("Framebuffer: ");
@@ -985,7 +1312,7 @@ void kernel_main(uint64_t mb2_info_addr) {
 	print(", ");
 	print_uint(fb_bpp);
 	print("bpp\n");
-	delay_ms(100);
+	delay_ms(75);
 
 	print_timestamp();
 	print("Text grid: ");
@@ -993,38 +1320,104 @@ void kernel_main(uint64_t mb2_info_addr) {
 	print_char('x');
 	print_uint(total_rows);
 	print_char('\n');
-	delay_ms(100);
+	delay_ms(75);
 
 	print_timestamp();
 	print("IDT initialized\n");
-	delay_ms(100);
+	delay_ms(75);
 
 	print_timestamp();
 	print("PIC initialized\n");
-	delay_ms(100);
+	delay_ms(75);
 
 	print_timestamp();
 	print("PIT initialized at 1000Hz\n");
-	delay_ms(100);
+	delay_ms(75);
 
 	print_timestamp();
 	ext2_print_info();
-	delay_ms(100);
+	delay_ms(75);
+
+	if (mb2_mmap_addr != 0 && mb2_mmap_size > 0) {
+		pmm_init(mb2_mmap_addr, mb2_mmap_size);
+	}
+
+	print_timestamp();
+	print("pmm: total=");
+	print_uint(pmm_total_frames());
+	print(", free=");
+	print_uint(pmm_free_frames());
+	print_char('\n');
+	delay_ms(75);
+
+	{
+		static uint64_t test_frames[1000];
+		uint32_t before = pmm_free_frames();
+		int alloc_ok = 1;
+
+		for (int i = 0; i < 1000; i++) {
+			test_frames[i] = pmm_alloc_frame();
+
+			if (test_frames[i] == 0) {
+				print("pmm: alloc fail at ");
+				print_uint((uint32_t)i);
+				print_char('\n');
+				alloc_ok = 0;
+				break;
+			}
+		}
+
+		for (int i = 0; i < 1000; i++) {
+			if (test_frames[i] != 0) {
+				pmm_free_frame(test_frames[i]);
+			}
+		}
+
+		uint32_t after = pmm_free_frames();
+
+		print_timestamp();
+		print("pmm self-test: ");
+
+		if (alloc_ok && before == after) {
+			print("OK\n");
+		} else {
+			print("FAIL, before=");
+			print_uint(before);
+			print(", after=");
+			print_uint(after);
+			print_char('\n');
+		}
+
+		delay_ms(75);
+	}
+
+	vmm_init();
+
+	tss_init();
+	syscall_init();
+
+	print_timestamp();
+	print("TSS and syscall initialized\n");
+	delay_ms(75);
+
+	// 1c 回归测试期间跳过 ring3 测试，让系统正常进 shell
+	// 第 2 批调度器完成后恢复，届时 shell 与 ring3 任务共存
+	// user_test_run();
 
 	print_timestamp();
 	print("Kernel ready... ");
 
-	for (int i = 0; i < 10; i++) {
-		print("|");
+	for (int i = 0; i < 5; i++) {
+		print_char('|');
 		delay_ms(100);
 		cursor_move(-1, 0);
-		print("/");
+		print_char('/');
 		delay_ms(100);
 		cursor_move(-1, 0);
-		print("-");
+		print_char('-');
 		delay_ms(100);
 		cursor_move(-1, 0);
-		print("\\");
+		print_char('\\');
 		delay_ms(100);
 		cursor_move(-1, 0);
 	}
@@ -1050,6 +1443,21 @@ void kernel_main(uint64_t mb2_info_addr) {
 	key_head = 0;
 	key_tail = 0;
 
+	login_init();
+
+	task_init();
+
+	print("user entry addr: ");
+	print_hex((uint64_t)(uintptr_t)user_prog_entry);
+	print_char('\n');
+
+	task_create_user(user_prog_entry, "userA");
+
+	print_timestamp();
+	print("user task A created\n");
+	delay_ms(75);
+
 	shell_init();
+
 	shell_run();
 }

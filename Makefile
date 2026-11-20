@@ -1,10 +1,10 @@
 # DogusOS 构建系统，读取 version.h 生成 grub.cfg 并制作磁盘镜像
 
 # 从 version.h 提取宏值，唯一数据源
-OS_NAME := $(shell gcc -dM -E version.h | awk '/#define OS_NAME / {print $$3}' | tr -d '"')
-OS_VERSION := $(shell gcc -dM -E version.h | awk '/#define OS_VERSION / {print $$3}' | tr -d '"')
-OS_ARCH := $(shell gcc -dM -E version.h | awk '/#define OS_ARCH / {print $$3}' | tr -d '"')
-OS_BITS := $(shell gcc -dM -E version.h | awk '/#define OS_BITS / {print $$3}' | tr -d '"')
+OS_NAME := $(shell gcc -dM -E include/version.h | awk '/#define OS_NAME / {print $$3}' | tr -d '"')
+OS_VERSION := $(shell gcc -dM -E include/version.h | awk '/#define OS_VERSION / {print $$3}' | tr -d '"')
+OS_ARCH := $(shell gcc -dM -E include/version.h | awk '/#define OS_ARCH / {print $$3}' | tr -d '"')
+OS_BITS := $(shell gcc -dM -E include/version.h | awk '/#define OS_BITS / {print $$3}' | tr -d '"')
 
 # 镜像文件名：name-version-arch_bits.img
 IMG_NAME := $(shell echo $(OS_NAME) | sed 's/OS$$//' | tr 'A-Z' 'a-z')-$(OS_VERSION)-$(shell echo $(OS_ARCH) | tr 'A-Z' 'a-z')_$(OS_BITS).img
@@ -13,26 +13,100 @@ IMG_NAME := $(shell echo $(OS_NAME) | sed 's/OS$$//' | tr 'A-Z' 'a-z')-$(OS_VERS
 CC := gcc
 AS := nasm
 LD := ld
-CFLAGS := -std=gnu17 -Wall -Wextra -O0 -g -ffreestanding -fno-pie -mno-red-zone -mcmodel=kernel
+
+INCLUDES := -Iinclude -Ikernel -Imm -Ifs -Iarch -Isyscall -Ishell -Iusers
+CFLAGS := -std=gnu17 -Wall -Wextra -O0 -g -ffreestanding -fno-pie -mno-red-zone -mcmodel=kernel $(INCLUDES)
 ASFLAGS := -f elf64
-LDFLAGS := -T linker.ld -nostdlib -z noexecstack
+LDFLAGS := -T boot/linker.ld -nostdlib -z noexecstack
+
+BUILD := build
+
+# 源文件清单，新增文件时在此追加
+C_SOURCES := \
+	kernel/kernel.c \
+	kernel/exception.c \
+	kernel/task.c \
+	mm/pmm.c \
+	mm/vmm.c \
+	fs/ext2.c \
+	fs/disk.c \
+	syscall/syscall.c \
+	arch/tss.c \
+	arch/user_prog.c \
+	arch/user_test.c \
+	shell/shell.c \
+	shell/commands.c \
+	users/users.c \
+	users/login.c
+
+ASM_SOURCES := \
+	boot/boot.asm \
+	arch/isr_stub.asm \
+	arch/syscall_entry.asm \
+	arch/switch.asm
+
+C_OBJECTS := $(patsubst %.c,$(BUILD)/%.o,$(C_SOURCES))
+ASM_OBJECTS := $(patsubst %.asm,$(BUILD)/%.o,$(ASM_SOURCES))
+OBJECTS := $(ASM_OBJECTS) $(C_OBJECTS)
 
 # QEMU 参数
 QEMU := qemu-system-x86_64
 QEMU_FLAGS := -m 512M -display gtk -device VGA,edid=on,xres=640,yres=400 -drive file=$(IMG_NAME),format=raw
 
-.PHONY: all run clean debug
+.PHONY: update all kernel grubcfg run clean debug
 
-# 默认目标：每次强制重新构建并生成镜像
-all:
-	$(AS) $(ASFLAGS) boot.asm -o boot.o
-	$(CC) $(CFLAGS) -c kernel.c -o kernel.o
-	$(CC) $(CFLAGS) -c shell.c -o shell.o
-	$(CC) $(CFLAGS) -c commands.c -o commands.o
-	$(CC) $(CFLAGS) -c disk.c -o disk.o
-	$(CC) $(CFLAGS) -c ext2.c -o ext2.o
-	$(CC) $(CFLAGS) -c users.c -o users.o
-	$(LD) $(LDFLAGS) boot.o kernel.o shell.o commands.o disk.o ext2.o users.o -o kernel.elf
+# 默认目标：只更新已有镜像里的内核与 grub.cfg，保留用户数据
+update: kernel grubcfg
+	@test -f $(IMG_NAME) || { echo "镜像不存在，请先执行 make all"; exit 1; }
+	@echo "更新镜像 $(IMG_NAME) 中的内核"
+	@LOOP=$$(sudo losetup -f); \
+	sudo losetup -P $$LOOP $(IMG_NAME) || { echo "losetup 失败"; exit 1; }; \
+	MNT=$$(mktemp -d); \
+	sudo mount $${LOOP}p1 $$MNT || { echo "mount 失败"; sudo losetup -d $$LOOP; rmdir $$MNT; exit 1; }; \
+	sudo cp $(BUILD)/kernel.elf $$MNT/boot/kernel.elf || { echo "cp kernel.elf 失败"; sudo umount $$MNT; rmdir $$MNT; sudo losetup -d $$LOOP; exit 1; }; \
+	sudo cp grub.cfg $$MNT/boot/grub/grub.cfg || { echo "cp grub.cfg 失败"; sudo umount $$MNT; rmdir $$MNT; sudo losetup -d $$LOOP; exit 1; }; \
+	sudo umount $$MNT; \
+	rmdir $$MNT; \
+	sudo losetup -d $$LOOP; \
+	echo "内核更新完成"
+
+# 全量生成镜像，会清空用户数据
+all: kernel grubcfg
+	@echo "创建镜像 $(IMG_NAME)"
+	@dd if=/dev/zero of=$(IMG_NAME) bs=1M count=1024 status=none
+	@LOOP=$$(sudo losetup -f); \
+	sudo losetup -P $$LOOP $(IMG_NAME) || { echo "losetup 失败"; exit 1; }; \
+	sudo parted -s $$LOOP mklabel msdos || { echo "parted mklabel 失败"; sudo losetup -d $$LOOP; exit 1; }; \
+	sudo parted -s $$LOOP mkpart primary ext2 1MiB 100% || { echo "parted mkpart 失败"; sudo losetup -d $$LOOP; exit 1; }; \
+	sudo partprobe $$LOOP; \
+	sleep 1; \
+	PART=$${LOOP}p1; \
+	sudo mkfs.ext2 -q $$PART || { echo "mkfs.ext2 失败"; sudo losetup -d $$LOOP; exit 1; }; \
+	MNT=$$(mktemp -d); \
+	sudo mount $$PART $$MNT || { echo "mount 失败"; sudo losetup -d $$LOOP; rmdir $$MNT; exit 1; }; \
+	sudo mkdir -p $$MNT/boot/grub; \
+	sudo cp $(BUILD)/kernel.elf $$MNT/boot/kernel.elf; \
+	sudo cp grub.cfg $$MNT/boot/grub/grub.cfg; \
+	sudo grub-install --target=i386-pc --boot-directory=$$MNT/boot --modules="multiboot2 normal" $$LOOP || { echo "grub-install 失败"; sudo umount $$MNT; rmdir $$MNT; sudo losetup -d $$LOOP; exit 1; }; \
+	sudo umount $$MNT; \
+	rmdir $$MNT; \
+	sudo losetup -d $$LOOP; \
+	echo "镜像生成完成"
+
+# 编译内核并链接
+kernel: $(OBJECTS)
+	$(LD) $(LDFLAGS) $(OBJECTS) -o $(BUILD)/kernel.elf
+
+$(BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: %.asm
+	@mkdir -p $(dir $@)
+	$(AS) $(ASFLAGS) $< -o $@
+
+# 生成 grub.cfg
+grubcfg:
 	@echo 'set gfxmode=640x400' > grub.cfg
 	@echo 'set timeout=0' >> grub.cfg
 	@echo 'set timeout_style=hidden' >> grub.cfg
@@ -41,32 +115,12 @@ all:
 	@echo 'menuentry "$(OS_NAME) $(OS_VERSION)" {' >> grub.cfg
 	@echo '	multiboot2 /boot/kernel.elf' >> grub.cfg
 	@echo '}' >> grub.cfg
-	@echo "创建镜像 $(IMG_NAME)"
-	@dd if=/dev/zero of=$(IMG_NAME) bs=1M count=1024 status=none
-	@LOOP=$$(sudo losetup -f); \
-	sudo losetup $$LOOP $(IMG_NAME); \
-	sudo parted -s $$LOOP mklabel msdos; \
-	sudo parted -s $$LOOP mkpart primary ext2 1MiB 100%; \
-	sudo partprobe $$LOOP; \
-	sleep 1; \
-	PART=$${LOOP}p1; \
-	sudo mkfs.ext2 -q $$PART; \
-	MNT=$$(mktemp -d); \
-	sudo mount $$PART $$MNT; \
-	sudo mkdir -p $$MNT/boot/grub; \
-	sudo cp kernel.elf $$MNT/boot/kernel.elf; \
-	sudo cp grub.cfg $$MNT/boot/grub/grub.cfg; \
-	sudo grub-install --target=i386-pc --boot-directory=$$MNT/boot --modules="multiboot2 normal" $$LOOP; \
-	sudo umount $$MNT; \
-	rmdir $$MNT; \
-	sudo losetup -d $$LOOP; \
-	echo "镜像生成完成"
 
-# 启动 QEMU 测试，不依赖 all，需先 make all
+# 启动 QEMU 测试，不依赖 all，需先 make all 或 make
 run:
 	$(QEMU) $(QEMU_FLAGS)
 
-# 启动 QEMU 并等待 GDB 连接，不依赖 all，需先 make all
+# 启动 QEMU 并等待 GDB 连接，不依赖 all，需先 make all 或 make
 debug:
 	$(QEMU) $(QEMU_FLAGS) -s -S
 
@@ -79,6 +133,5 @@ clean:
 	@for loop in $$(losetup -a | awk -F: '/$(IMG_NAME)/ {print $$1}'); do \
 		sudo losetup -d $$loop 2>/dev/null || true; \
 	done
-	@rm -f boot.o kernel.o shell.o commands.o disk.o ext2.o users.o kernel.elf grub.cfg
-	@rm -rf tmp_mnt
+	@rm -rf $(BUILD) grub.cfg
 	@echo "清理完成，保留源文件与 $(IMG_NAME)"

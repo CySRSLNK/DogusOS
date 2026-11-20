@@ -23,16 +23,21 @@ int line_old_len = 0;
 #define KEY_DELETE	0x05
 #define KEY_UP		0x06
 #define KEY_DOWN	0x07
+#define KEY_CTRL_L	0x0B
+#define KEY_CTRL_C	0x0C
 
-const char *host = "host";
+char host[HOST_NAME_MAX] = "dogus";
 
 uint32_t current_uid = 0;
 uint32_t current_euid = 0;
+uint32_t current_egid = 0;
 
 char current_user[32] = "root";
+char current_home[256] = "/root";
 
 char cwd[256] = "/";
 char path_buf[256] = "/";
+char oldpwd[256] = { 0 };
 
 char prompt_buf[128] = { 0 };
 
@@ -45,6 +50,52 @@ int last_exit_code = 0;
 
 #define ARGV_MAX 512
 #define GLOB_TOKEN_SIZE 256
+
+// 把 cwd 转为提示符显示：等于 home 时显示 ~，home 下的子路径显示 ~/xxx
+static void format_cwd_for_prompt(char *out, int out_size) {
+	int home_len = 0;
+	while (current_home[home_len] != '\0') {
+		home_len++;
+	}
+
+	int cwd_len = 0;
+	while (cwd[cwd_len] != '\0') {
+		cwd_len++;
+	}
+
+	if (home_len > 1 && cwd_len >= home_len) {
+		int same = 1;
+
+		for (int i = 0; i < home_len; i++) {
+			if (cwd[i] != current_home[i]) {
+				same = 0;
+				break;
+			}
+		}
+
+		if (same && (cwd[home_len] == '\0' || cwd[home_len] == '/')) {
+			int w = 0;
+
+			if (w < out_size - 1) {
+				out[w++] = '~';
+			}
+
+			for (int i = home_len; cwd[i] != '\0' && w < out_size - 1; i++) {
+				out[w++] = cwd[i];
+			}
+
+			out[w] = '\0';
+			return;
+		}
+	}
+
+	int w = 0;
+	while (cwd[w] != '\0' && w < out_size - 1) {
+		out[w] = cwd[w];
+		w++;
+	}
+	out[w] = '\0';
+}
 
 void build_prompt(void) {
 	int i = 0;
@@ -68,14 +119,24 @@ void build_prompt(void) {
 		prompt_buf[i++] = ':';
 	}
 
-	j = 0;
-	while (path_buf[j] != '\0' && i < 127) {
-		prompt_buf[i++] = path_buf[j];
-		j++;
+	{
+		char display[256];
+		format_cwd_for_prompt(display, 256);
+
+		j = 0;
+		while (display[j] != '\0' && i < 127) {
+			prompt_buf[i++] = display[j];
+			j++;
+		}
 	}
 
 	if (i < 126) {
-		prompt_buf[i++] = '$';
+		if (current_euid == 0) {
+			prompt_buf[i++] = '#';
+		} else {
+			prompt_buf[i++] = '$';
+		}
+
 		prompt_buf[i++] = ' ';
 	}
 
@@ -204,6 +265,85 @@ static void hist_edit_to_saved(void) {
 	}
 }
 
+// 获取当前用户的 history 文件路径，例如 /root/.history
+static void get_history_path(char *buf) {
+	int w = 0;
+
+	for (int i = 0; current_home[i] != '\0' && w < 250; i++) {
+		buf[w++] = current_home[i];
+	}
+
+	const char *suffix = "/.history";
+
+	for (int i = 0; suffix[i] != '\0' && w < 255; i++) {
+		buf[w++] = suffix[i];
+	}
+
+	buf[w] = '\0';
+}
+
+// 从磁盘加载历史记录
+static void hist_load_from_disk(void) {
+	char path[256];
+	get_history_path(path);
+
+	static char buf[65536];
+	int r = ext2_read_file(path, buf, 65535);
+
+	if (r <= 0) {
+		return;
+	}
+
+	hist_count = 0;
+	int i = 0;
+
+	while (i < r && hist_count < HIST_SIZE) {
+		int start = i;
+
+		while (i < r && buf[i] != '\n') {
+			i++;
+		}
+
+		int len = i - start;
+
+		if (len > 0 && len < HIST_LINE_LEN) {
+			for (int j = 0; j < len; j++) {
+				hist[hist_count][j] = buf[start + j];
+			}
+
+			hist[hist_count][len] = '\0';
+			hist_count++;
+		}
+
+		if (i < r) {
+			i++;
+		}
+	}
+
+	hist_pos = hist_count;
+}
+
+// 把当前历史记录保存到磁盘
+static void hist_save_to_disk(void) {
+	char path[256];
+	get_history_path(path);
+
+	static char buf[65536];
+	int w = 0;
+
+	for (int i = 0; i < hist_count; i++) {
+		for (int j = 0; hist[i][j] != '\0' && w < 65530; j++) {
+			buf[w++] = hist[i][j];
+		}
+
+		if (w < 65535) {
+			buf[w++] = '\n';
+		}
+	}
+
+	ext2_write_file(path, buf, (uint32_t)w, 0);
+}
+
 void redraw_line(void) {
 	cursor_lock();
 	cursor_hide();
@@ -295,15 +435,6 @@ void print_error(const char *source, const char *msg, const char *detail) {
 	print_char('\n');
 }
 
-int check_permission(const char *source, int need, int cur) {
-	if (cur >= need) {
-		return 1;
-	}
-
-	print_error(source, str_msg_permission, 0);
-	return 0;
-}
-
 int check_argc(const char *source, int min, int max, int cur) {
 	if (cur < min) {
 		print_error(source, str_msg_too_few, 0);
@@ -320,6 +451,84 @@ int check_argc(const char *source, int min, int max, int cur) {
 
 void print_cmd_not_found(const char *source, const char *cmd) {
 	print_error(source, str_msg_cmd_not_found, cmd);
+}
+
+// 提示输入密码并校验。目标密码为空时直接返回 0。
+// 校验失败或用户中断返回 -1，成功返回 0。
+int check_password(const char *source, const char *name) {
+	char expected[USER_PASS_MAX];
+
+	if (users_password_by_name(name, expected, USER_PASS_MAX) != 0) {
+		return 0;
+	}
+
+	if (expected[0] == '\0') {
+		return 0;
+	}
+
+	print(str_password_prompt);
+
+	char input[USER_PASS_MAX];
+	if (read_password(input, USER_PASS_MAX) < 0) {
+		return -1;
+	}
+
+	if (strcmp(input, expected) != 0) {
+		print_error(source, str_msg_incorrect_password, 0);
+		return -1;
+	}
+
+	return 0;
+}
+
+// 光标闪烁检查，shell 主循环与密码读取循环共用
+void handle_cursor_blink(void) {
+	if ((int64_t)(ticks - cursor_blink_next) >= 0) {
+		cursor_visible = !cursor_visible;
+		cursor_blink_next = ticks + CURSOR_BLINK_MS;
+		cursor_hide();
+		cursor_show();
+	}
+}
+
+// 从键盘读一行，不回显，末尾加 '\0'。
+// 返回长度，中断返回 -1。
+int read_password(char *buf, int max) {
+	int len = 0;
+
+	while (1) {
+		__asm__ volatile ("hlt");
+
+		handle_cursor_blink();
+
+		char c = get_key();
+		if (c == 0) {
+			continue;
+		}
+
+		if (c == 0x0C) {
+			print_char('^');
+			print_char('C');
+			print_char('\n');
+			return -1;
+		}
+
+		if (c == '\n') {
+			buf[len] = '\0';
+			print_char('\n');
+			return len;
+		}
+
+		if (c == '\b') {
+			if (len > 0) {
+				len--;
+			}
+		} else {
+			if (len < max - 1) {
+				buf[len++] = c;
+			}
+		}
+	}
 }
 
 static int split_tokens(char *line, char **argv) {
@@ -341,6 +550,7 @@ static int split_tokens(char *line, char **argv) {
 		int has_content = 0;
 		int in_single = 0;
 		int in_double = 0;
+		int tilde_done = 0;
 
 		while (line[i] != '\0') {
 			if (in_single) {
@@ -407,6 +617,18 @@ static int split_tokens(char *line, char **argv) {
 			} else {
 				if (line[i] == ' ') {
 					break;
+				} else if (line[i] == '~' && !tilde_done && !has_content) {
+					tilde_done = 1;
+
+					int k = 0;
+					while (current_home[k] != '\0' && w < LINE_BUF_SIZE * 16 - 2) {
+						out[w] = current_home[k];
+						w++;
+						k++;
+					}
+
+					has_content = 1;
+					i++;
 				} else if (line[i] == '\\' && line[i + 1] != '\0') {
 					out[w] = line[i + 1];
 					w++;
@@ -680,7 +902,7 @@ void handle_command(char *line) {
 	for (int i = 0; i < argc; i++) {
 		if (strcmp(argv[i], ">") == 0 || strcmp(argv[i], ">>") == 0) {
 			if (i + 1 >= argc) {
-				print_error("dogus", "syntax error", "unexpected end of line");
+				print_error("dogus", str_msg_syntax_error, str_msg_unexpected_eol);
 				last_exit_code = 1;
 				return;
 			}
@@ -709,15 +931,16 @@ void handle_command(char *line) {
 		return;
 	}
 
-	int derived_privilege = (current_euid == 0) ? 1 : 0;
-
 	for (int i = 0; i < command_count; i++) {
 		if (strcmp(expanded_argv[0], commands[i].name) == 0) {
 			int ret;
 
+			ctrl_c_hit = 0;
+			ctrl_c_reset();
+
 			if (redir_file != 0) {
 				redir_begin();
-				ret = commands[i].func(eargc - 1, expanded_argv + 1, derived_privilege);
+				ret = commands[i].func(eargc - 1, expanded_argv + 1);
 
 				int len = 0;
 				const char *data = redir_end(&len);
@@ -728,11 +951,17 @@ void handle_command(char *line) {
 				int r = ext2_write_file(norm, data, (uint32_t)len, redir_append);
 
 				if (r != 0) {
-					print_error("dogus", "cannot write", redir_file);
+					print_error("dogus", str_msg_cannot_write, redir_file);
 					ret = 1;
 				}
 			} else {
-				ret = commands[i].func(eargc - 1, expanded_argv + 1, derived_privilege);
+				ret = commands[i].func(eargc - 1, expanded_argv + 1);
+			}
+
+			if (ctrl_c_hit) {
+				ret = 130;
+				ctrl_c_hit = 0;
+				ctrl_c_reset();
 			}
 
 			last_exit_code = ret;
@@ -745,18 +974,86 @@ void handle_command(char *line) {
 }
 
 void shell_init(void) {
-	if (users_load() > 0) {
-		if (users_name_by_uid(current_uid, current_user, 32) != 0) {
-			// 保持默认
+	users_load();
+
+	uint32_t root_uid;
+
+	if (users_uid_by_name("root", &root_uid) != 0) {
+		users_add("root");
+		users[users_count - 1].uid = 0;
+		users[users_count - 1].gid = 0;
+
+		const char *rh = "/root";
+		int k = 0;
+		while (rh[k] != '\0' && k < USER_HOME_MAX - 1) {
+			users[users_count - 1].home[k] = rh[k];
+			k++;
+		}
+		users[users_count - 1].home[k] = '\0';
+
+		users_save();
+		users_load();
+	}
+
+	{
+		uint32_t home_ino;
+
+		if (ext2_lookup("/home", &home_ino) == 0) {
+			struct ext2_inode hino;
+			ext2_read_inode(home_ino, &hino);
+
+			if ((hino.i_mode & 0xF000) != 0x4000) {
+				ext2_remove("/home", 0);
+				ext2_mkdir("/home");
+			}
+		} else {
+			ext2_mkdir("/home");
 		}
 	}
 
+	for (int i = 0; i < users_count; i++) {
+		uint32_t ino;
+		int exists = (ext2_lookup(users[i].home, &ino) == 0);
+
+		if (exists) {
+			struct ext2_inode hino;
+			ext2_read_inode(ino, &hino);
+
+			if ((hino.i_mode & 0xF000) != 0x4000) {
+				ext2_remove(users[i].home, 0);
+
+				if (ext2_mkdir(users[i].home) != 0) {
+					continue;
+				}
+
+				if (ext2_lookup(users[i].home, &ino) != 0) {
+					continue;
+				}
+			}
+		} else {
+			if (ext2_mkdir(users[i].home) != 0) {
+				continue;
+			}
+
+			if (ext2_lookup(users[i].home, &ino) != 0) {
+				continue;
+			}
+		}
+
+		struct ext2_inode hino;
+		ext2_read_inode(ino, &hino);
+		hino.i_uid = (uint16_t)users[i].uid;
+		hino.i_gid = (uint16_t)users[i].gid;
+		ext2_write_inode(ino, &hino);
+	}
+
+	hist_load_from_disk();
+
 	build_prompt();
 
-	line_start_row = 0;
+	line_start_row = cursor_row;
 	line_old_rows = 0;
-
-	cursor_goto(0, 0);
+	line_old_len = 0;
 
 	line_len = 0;
 	line_cursor = 0;
@@ -768,14 +1065,7 @@ void shell_run(void) {
 	while (1) {
 		__asm__ volatile ("hlt");
 
-		if ((int64_t)(ticks - cursor_blink_next) >= 0) {
-			cursor_visible = !cursor_visible;
-
-			cursor_blink_next = ticks + CURSOR_BLINK_MS;
-
-			cursor_hide();
-			cursor_show();
-		}
+		handle_cursor_blink();
 
 		char c = get_key();
 		if (c == 0) {
@@ -841,6 +1131,8 @@ void shell_run(void) {
 
 					hist_count++;
 				}
+
+				hist_save_to_disk();
 			}
 
 			hist_pos = hist_count;
@@ -913,6 +1205,28 @@ void shell_run(void) {
 				line_cursor++;
 				redraw_line();
 			}
+		} else if (c == KEY_CTRL_L) {
+			clear_screen();
+			line_start_row = 0;
+			line_old_rows = 0;
+			line_old_len = 0;
+			cursor_goto(0, 0);
+			redraw_line();
+		} else if (c == KEY_CTRL_C) {
+			print_char('^');
+			print_char('C');
+			print_char('\n');
+
+			last_exit_code = 130;
+
+			line_len = 0;
+			line_cursor = 0;
+			line_buf[0] = '\0';
+			line_start_row = cursor_row;
+			line_old_rows = 0;
+			line_old_len = 0;
+
+			redraw_line();
 		} else if (c == KEY_HOME) {
 			line_cursor = 0;
 			redraw_line();

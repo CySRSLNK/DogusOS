@@ -1,4 +1,4 @@
-// ext2 文件系统，支持读超级块、读写 inode、列目录、创建、删除、写文件
+// ext2 文件系统，支持读超级块、读写 inode、列目录、创建、删除、写文件，带权限检查
 #include <stdint.h>
 #include "kernel.h"
 #include "ext2.h"
@@ -11,6 +11,10 @@
 #define EXT2_MAGIC		0xEF53
 
 #define EXT2_ROOT_INO		2
+
+#define PERM_READ	4
+#define PERM_WRITE	2
+#define PERM_EXEC	1
 
 // 超级块
 struct ext2_superblock {
@@ -97,6 +101,24 @@ static char ext2_type_char(uint16_t mode) {
 	}
 }
 
+// 把 i_mode 转成 10 字符权限串，形如 -rw-r--r--
+void ext2_perm_str(uint16_t mode, char *buf) {
+	buf[0] = ext2_type_char(mode);
+
+	int shifts[9] = { 6, 6, 6, 3, 3, 3, 0, 0, 0 };
+	char chars[9] = { 'r', 'w', 'x', 'r', 'w', 'x', 'r', 'w', 'x' };
+
+	for (int i = 0; i < 9; i++) {
+		if (mode & (1 << (shifts[i] + (2 - i % 3)))) {
+			buf[i + 1] = chars[i];
+		} else {
+			buf[i + 1] = '-';
+		}
+	}
+
+	buf[10] = '\0';
+}
+
 // 读一个块
 static int ext2_read_block(uint32_t block, void *buf) {
 	uint32_t lba = EXT2_PARTITION_LBA + block * (block_size / 512);
@@ -109,6 +131,36 @@ static int ext2_write_block(uint32_t block, const void *buf) {
 	uint32_t lba = EXT2_PARTITION_LBA + block * (block_size / 512);
 	uint8_t count = block_size / 512;
 	return disk_write_sectors(lba, count, buf);
+}
+
+// 把逻辑块号映射到物理块号，未分配返回 0
+// 只处理 12 个直接块和 i_block[12] 一级间接块
+static uint32_t ext2_get_data_block(const struct ext2_inode *inode, uint32_t logical) {
+	if (logical < 12) {
+		return inode->i_block[logical];
+	}
+
+	uint32_t indirect = inode->i_block[12];
+
+	if (indirect == 0) {
+		return 0;
+	}
+
+	uint32_t per_block = block_size / 4;
+	uint32_t index = logical - 12;
+
+	if (index >= per_block) {
+		return 0;
+	}
+
+	uint32_t entry_offset = index * 4;
+	uint32_t lba = EXT2_PARTITION_LBA + indirect * (block_size / 512) + entry_offset / 512;
+	uint8_t tmp[512];
+
+	disk_read_sectors(lba, 1, tmp);
+
+	uint32_t *p = (uint32_t *)tmp;
+	return p[(entry_offset % 512) / 4];
 }
 
 // 写回超级块
@@ -224,6 +276,31 @@ int ext2_write_inode(uint32_t ino, const struct ext2_inode *in) {
 	return 0;
 }
 
+// 权限检查，need 为 4 读、2 写、1 执行，允许返回 0，拒绝返回 -1
+int ext2_check_perm(const struct ext2_inode *inode, int need, int owner_ok) {
+	(void)owner_ok;
+
+	if (current_euid == 0) {
+		return 0;
+	}
+
+	int perm;
+
+	if (current_euid == inode->i_uid) {
+		perm = (inode->i_mode >> 6) & 7;
+	} else if (current_egid == inode->i_gid) {
+		perm = (inode->i_mode >> 3) & 7;
+	} else {
+		perm = inode->i_mode & 7;
+	}
+
+	if ((perm & need) == need) {
+		return 0;
+	}
+
+	return -1;
+}
+
 // 分配 inode，成功返回 inode 号，失败返回 0
 int ext2_alloc_inode(void) {
 	uint32_t group_count = (sb.blocks_count + sb.blocks_per_group - 1) / sb.blocks_per_group;
@@ -306,6 +383,70 @@ int ext2_alloc_block(void) {
 	}
 
 	return 0;
+}
+
+// 分配逻辑块对应的物理块，已分配则直接返回
+// 成功返回块号，失败返回 0
+static uint32_t ext2_alloc_data_block(struct ext2_inode *inode, uint32_t logical) {
+	if (logical < 12) {
+		if (inode->i_block[logical] != 0) {
+			return inode->i_block[logical];
+		}
+
+		uint32_t b = ext2_alloc_block();
+
+		if (b == 0) {
+			return 0;
+		}
+
+		inode->i_block[logical] = b;
+		return b;
+	}
+
+	uint32_t per_block = block_size / 4;
+	uint32_t index = logical - 12;
+
+	if (index >= per_block) {
+		return 0;
+	}
+
+	if (inode->i_block[12] == 0) {
+		uint32_t ib = ext2_alloc_block();
+
+		if (ib == 0) {
+			return 0;
+		}
+
+		for (uint32_t i = 0; i < block_size; i++) {
+			block_buf[i] = 0;
+		}
+
+		ext2_write_block(ib, block_buf);
+		inode->i_block[12] = ib;
+	}
+
+	uint32_t entry_offset = index * 4;
+	uint32_t lba = EXT2_PARTITION_LBA + inode->i_block[12] * (block_size / 512) + entry_offset / 512;
+	uint8_t tmp[512];
+
+	disk_read_sectors(lba, 1, tmp);
+
+	uint32_t *p = (uint32_t *)tmp;
+
+	if (p[(entry_offset % 512) / 4] != 0) {
+		return p[(entry_offset % 512) / 4];
+	}
+
+	uint32_t b = ext2_alloc_block();
+
+	if (b == 0) {
+		return 0;
+	}
+
+	p[(entry_offset % 512) / 4] = b;
+	disk_write_sectors(lba, 1, tmp);
+
+	return b;
 }
 
 // 释放一个块
@@ -649,6 +790,60 @@ int ext2_lookup(const char *path, uint32_t *ino) {
 	return 0;
 }
 
+// 拆路径为父目录 inode 与目标名，成功返回 0
+int ext2_lookup_parent(const char *path, uint32_t *parent_ino, char *name) {
+	int len = 0;
+	while (path[len] != '\0') {
+		len++;
+	}
+
+	if (len < 2 || path[0] != '/') {
+		return -1;
+	}
+
+	int slash = -1;
+	for (int i = len - 1; i >= 1; i--) {
+		if (path[i] == '/') {
+			slash = i;
+			break;
+		}
+	}
+
+	char parent[256];
+
+	if (slash == -1) {
+		parent[0] = '/';
+		parent[1] = '\0';
+
+		int k = 0;
+		for (int i = 1; i < len; i++) {
+			name[k++] = path[i];
+		}
+		name[k] = '\0';
+	} else {
+		for (int i = 0; i < slash; i++) {
+			parent[i] = path[i];
+		}
+		parent[slash] = '\0';
+
+		int k = 0;
+		for (int i = slash + 1; i < len; i++) {
+			name[k++] = path[i];
+		}
+		name[k] = '\0';
+	}
+
+	if (name[0] == '\0') {
+		return -1;
+	}
+
+	if (ext2_lookup(parent, parent_ino) != 0) {
+		return -1;
+	}
+
+	return 0;
+}
+
 // 列目录
 void ext2_ls(const char *path, int show_hidden, int show_inode, int show_long) {
 	if (!ext2_ok) {
@@ -716,6 +911,10 @@ void ext2_ls(const char *path, int show_hidden, int show_inode, int show_long) {
 			if (offset + de->rec_len > block_size) {
 				break;
 			}
+
+			if (key_check_ctrl_c() || ctrl_c_hit) {
+				return;
+			}
 		}
 	}
 
@@ -750,14 +949,30 @@ void ext2_ls(const char *path, int show_hidden, int show_inode, int show_long) {
 
 			struct ext2_inode child;
 			ext2_read_inode(inodes[i], &child);
-			print_char(ext2_type_char(child.i_mode));
+
+			char perm[12];
+			ext2_perm_str(child.i_mode, perm);
+			print(perm);
+			print_char(' ');
+
+			print_uint(child.i_uid);
+			print_char(' ');
+			print_uint(child.i_gid);
 			print_char(' ');
 			print_uint(child.i_size);
 			print_char(' ');
 			print(names[i]);
 			print_char('\n');
+
+			if (key_check_ctrl_c() || ctrl_c_hit) {
+				return;
+			}
 		}
 
+		return;
+	}
+
+	if (count == 0) {
 		return;
 	}
 
@@ -779,10 +994,6 @@ void ext2_ls(const char *path, int show_hidden, int show_inode, int show_long) {
 		}
 
 		widths[i] = n;
-	}
-
-	if (count == 0) {
-		return;
 	}
 
 	int cols = count;
@@ -890,6 +1101,10 @@ void ext2_ls(const char *path, int show_hidden, int show_inode, int show_long) {
 		}
 
 		print_char('\n');
+
+		if (key_check_ctrl_c() || ctrl_c_hit) {
+			return;
+		}
 	}
 }
 
@@ -897,7 +1112,7 @@ void ext2_ls(const char *path, int show_hidden, int show_inode, int show_long) {
 static uint8_t tree_frame[8][4096];
 
 static void ext2_tree_recursive(uint32_t ino, const char *prefix, int depth, int show_hidden) {
-	if (depth >= 8) {
+	if (depth >= 8 || ctrl_c_hit) {
 		return;
 	}
 
@@ -989,6 +1204,10 @@ static void ext2_tree_recursive(uint32_t ino, const char *prefix, int depth, int
 			if (offset + de->rec_len > block_size) {
 				break;
 			}
+
+			if (key_check_ctrl_c() || ctrl_c_hit) {
+				return;
+			}
 		}
 	}
 }
@@ -1008,7 +1227,8 @@ void ext2_tree(const char *path, int show_hidden) {
 	ext2_tree_recursive(ino, "", 0, show_hidden);
 }
 
-// 读文件内容并打印，成功返回 0，失败返回负值
+// 读文件内容并打印，成功返回 0
+// -1 不存在，-2 是目录，-3 权限不足，-4 被 Ctrl+C 中断
 int ext2_cat(const char *path) {
 	if (!ext2_ok) {
 		return -1;
@@ -1027,24 +1247,37 @@ int ext2_cat(const char *path) {
 		return -2;
 	}
 
+	if (ext2_check_perm(&inode, PERM_READ, 0) != 0) {
+		return -3;
+	}
+
 	uint32_t size = inode.i_size;
 	uint32_t printed = 0;
+	uint32_t logical = 0;
 
-	for (int b = 0; b < 12; b++) {
-		if (inode.i_block[b] == 0) {
+	while (printed < size) {
+		uint32_t phys = ext2_get_data_block(&inode, logical);
+
+		if (phys == 0) {
 			break;
 		}
 
-		if (printed >= size) {
-			break;
-		}
-
-		ext2_read_block(inode.i_block[b], block_buf);
+		ext2_read_block(phys, block_buf);
 
 		for (uint32_t i = 0; i < block_size && printed < size; i++) {
 			print_char(block_buf[i]);
 			printed++;
+
+			if ((printed & 0x3FF) == 0 && key_check_ctrl_c()) {
+				return -4;
+			}
 		}
+
+		if (ctrl_c_hit) {
+			return -4;
+		}
+
+		logical++;
 	}
 
 	return 0;
@@ -1116,58 +1349,13 @@ int ext2_list_names(uint32_t ino, char names[][256], int max) {
 	return count;
 }
 
-// 创建目录，成功返回 0，失败返回负值
-// -1 父目录不存在，-2 目标已存在，-3 父不是目录，-4 无空间
+// 创建目录，成功返回 0
+// -1 父目录不存在，-2 目标已存在，-3 父不是目录，-4 无空间，-6 权限不足
 int ext2_mkdir(const char *path) {
-	int len = 0;
-	while (path[len] != '\0') {
-		len++;
-	}
-
-	if (len < 2 || path[0] != '/') {
-		return -1;
-	}
-
-	int slash = -1;
-	for (int i = len - 1; i >= 1; i--) {
-		if (path[i] == '/') {
-			slash = i;
-			break;
-		}
-	}
-
-	char parent[256];
 	char name[256];
-
-	if (slash == -1) {
-		parent[0] = '/';
-		parent[1] = '\0';
-
-		int k = 0;
-		for (int i = 1; i < len; i++) {
-			name[k++] = path[i];
-		}
-		name[k] = '\0';
-	} else {
-		for (int i = 0; i < slash; i++) {
-			parent[i] = path[i];
-		}
-		parent[slash] = '\0';
-
-		int k = 0;
-		for (int i = slash + 1; i < len; i++) {
-			name[k++] = path[i];
-		}
-		name[k] = '\0';
-	}
-
-	if (name[0] == '\0') {
-		return -1;
-	}
-
 	uint32_t parent_ino;
 
-	if (ext2_lookup(parent, &parent_ino) != 0) {
+	if (ext2_lookup_parent(path, &parent_ino, name) != 0) {
 		return -1;
 	}
 
@@ -1176,6 +1364,10 @@ int ext2_mkdir(const char *path) {
 
 	if ((pino.i_mode & 0xF000) != 0x4000) {
 		return -3;
+	}
+
+	if (ext2_check_perm(&pino, PERM_WRITE | PERM_EXEC, 0) != 0) {
+		return -6;
 	}
 
 	uint32_t existing;
@@ -1205,6 +1397,9 @@ int ext2_mkdir(const char *path) {
 	dot->name_len = 1;
 	dot->file_type = 2;
 	dot->name[0] = '.';
+	dot->name[1] = '\0';
+	dot->name[2] = '\0';
+	dot->name[3] = '\0';
 
 	struct ext2_dir_entry *dotdot = (struct ext2_dir_entry *)(block_buf + 12);
 	dotdot->inode = parent_ino;
@@ -1213,6 +1408,8 @@ int ext2_mkdir(const char *path) {
 	dotdot->file_type = 2;
 	dotdot->name[0] = '.';
 	dotdot->name[1] = '.';
+	dotdot->name[2] = '\0';
+	dotdot->name[3] = '\0';
 
 	ext2_write_block(new_block, block_buf);
 
@@ -1222,6 +1419,8 @@ int ext2_mkdir(const char *path) {
 	}
 
 	new_inode.i_mode = 0x41ED;
+	new_inode.i_uid = (uint16_t)current_euid;
+	new_inode.i_gid = (uint16_t)current_egid;
 	new_inode.i_size = block_size;
 	new_inode.i_links_count = 2;
 	new_inode.i_blocks = block_size / 512;
@@ -1238,6 +1437,8 @@ int ext2_mkdir(const char *path) {
 
 	return 0;
 }
+
+static void ext2_free_file_blocks(struct ext2_inode *inode);
 
 // 递归删除 inode 指向的文件或目录内容
 static void ext2_remove_recursive(uint32_t ino, int depth) {
@@ -1286,69 +1487,18 @@ static void ext2_remove_recursive(uint32_t ino, int depth) {
 		}
 	}
 
-	for (int b = 0; b < 12; b++) {
-		if (inode.i_block[b] == 0) {
-			break;
-		}
-
-		ext2_free_block(inode.i_block[b]);
-	}
-
+	ext2_free_file_blocks(&inode);
 	ext2_free_inode(ino);
 }
 
-// 删除文件或目录，成功返回 0，失败返回负值
+// 删除文件或目录，成功返回 0
+// -1 父目录不存在，-2 目标不存在，-3 父不是目录，-4 目标是目录但没有 -r，-6 权限不足
 int ext2_remove(const char *path, int recursive) {
-	int len = 0;
-	while (path[len] != '\0') {
-		len++;
-	}
-
-	if (len < 2 || path[0] != '/') {
-		return -2;
-	}
-
-	int slash = -1;
-	for (int i = len - 1; i >= 1; i--) {
-		if (path[i] == '/') {
-			slash = i;
-			break;
-		}
-	}
-
-	char parent[256];
 	char name[256];
-
-	if (slash == -1) {
-		parent[0] = '/';
-		parent[1] = '\0';
-
-		int k = 0;
-		for (int i = 1; i < len; i++) {
-			name[k++] = path[i];
-		}
-		name[k] = '\0';
-	} else {
-		for (int i = 0; i < slash; i++) {
-			parent[i] = path[i];
-		}
-		parent[slash] = '\0';
-
-		int k = 0;
-		for (int i = slash + 1; i < len; i++) {
-			name[k++] = path[i];
-		}
-		name[k] = '\0';
-	}
-
-	if (name[0] == '\0') {
-		return -2;
-	}
-
 	uint32_t parent_ino;
 
-	if (ext2_lookup(parent, &parent_ino) != 0) {
-		return -1;
+	if (ext2_lookup_parent(path, &parent_ino, name) != 0) {
+		return -2;
 	}
 
 	struct ext2_inode pino;
@@ -1356,6 +1506,10 @@ int ext2_remove(const char *path, int recursive) {
 
 	if ((pino.i_mode & 0xF000) != 0x4000) {
 		return -3;
+	}
+
+	if (ext2_check_perm(&pino, PERM_WRITE | PERM_EXEC, 0) != 0) {
+		return -6;
 	}
 
 	uint32_t target_ino;
@@ -1393,58 +1547,14 @@ int ext2_remove(const char *path, int recursive) {
 	return 0;
 }
 
-// 删除空目录，成功返回 0，失败返回负值
+// 删除空目录，成功返回 0
+// -1 父目录不存在，-2 目标不存在，-3 父不是目录，-4 目标不是目录，-5 目录非空，-6 权限不足
 int ext2_rmdir(const char *path) {
-	int len = 0;
-	while (path[len] != '\0') {
-		len++;
-	}
-
-	if (len < 2 || path[0] != '/') {
-		return -2;
-	}
-
-	int slash = -1;
-	for (int i = len - 1; i >= 1; i--) {
-		if (path[i] == '/') {
-			slash = i;
-			break;
-		}
-	}
-
-	char parent[256];
 	char name[256];
-
-	if (slash == -1) {
-		parent[0] = '/';
-		parent[1] = '\0';
-
-		int k = 0;
-		for (int i = 1; i < len; i++) {
-			name[k++] = path[i];
-		}
-		name[k] = '\0';
-	} else {
-		for (int i = 0; i < slash; i++) {
-			parent[i] = path[i];
-		}
-		parent[slash] = '\0';
-
-		int k = 0;
-		for (int i = slash + 1; i < len; i++) {
-			name[k++] = path[i];
-		}
-		name[k] = '\0';
-	}
-
-	if (name[0] == '\0') {
-		return -2;
-	}
-
 	uint32_t parent_ino;
 
-	if (ext2_lookup(parent, &parent_ino) != 0) {
-		return -1;
+	if (ext2_lookup_parent(path, &parent_ino, name) != 0) {
+		return -2;
 	}
 
 	struct ext2_inode pino;
@@ -1452,6 +1562,10 @@ int ext2_rmdir(const char *path) {
 
 	if ((pino.i_mode & 0xF000) != 0x4000) {
 		return -3;
+	}
+
+	if (ext2_check_perm(&pino, PERM_WRITE | PERM_EXEC, 0) != 0) {
+		return -6;
 	}
 
 	uint32_t target_ino;
@@ -1525,7 +1639,7 @@ int ext2_rmdir(const char *path) {
 	return 0;
 }
 
-// 释放文件占用的所有直接块，并把 i_block 清零
+// 释放文件占用的所有直接块与一级间接块，并把 i_block 清零
 static void ext2_free_file_blocks(struct ext2_inode *inode) {
 	for (int b = 0; b < 12; b++) {
 		if (inode->i_block[b] != 0) {
@@ -1533,9 +1647,28 @@ static void ext2_free_file_blocks(struct ext2_inode *inode) {
 			inode->i_block[b] = 0;
 		}
 	}
+
+	if (inode->i_block[12] != 0) {
+		uint32_t indirect = inode->i_block[12];
+		uint32_t per_block = block_size / 4;
+
+		ext2_read_block(indirect, block_buf);
+
+		uint32_t *p = (uint32_t *)block_buf;
+
+		for (uint32_t i = 0; i < per_block; i++) {
+			if (p[i] != 0) {
+				ext2_free_block(p[i]);
+			}
+		}
+
+		ext2_free_block(indirect);
+		inode->i_block[12] = 0;
+	}
 }
 
 // 读文件全部内容到 buffer，返回实际字节数
+// -1 不存在，-2 是目录，-3 权限不足
 int ext2_read_file(const char *path, char *buffer, uint32_t max) {
 	uint32_t ino;
 
@@ -1550,84 +1683,52 @@ int ext2_read_file(const char *path, char *buffer, uint32_t max) {
 		return -2;
 	}
 
+	if (ext2_check_perm(&inode, PERM_READ, 0) != 0) {
+		return -3;
+	}
+
 	uint32_t size = inode.i_size;
+
 	if (size > max) {
 		size = max;
 	}
 
 	uint32_t read = 0;
+	uint32_t logical = 0;
 
-	for (int b = 0; b < 12; b++) {
-		if (inode.i_block[b] == 0) {
+	while (read < size) {
+		uint32_t phys = ext2_get_data_block(&inode, logical);
+
+		if (phys == 0) {
 			break;
 		}
 
-		if (read >= size) {
-			break;
+		ext2_read_block(phys, block_buf);
+
+		uint32_t chunk = block_size;
+
+		if (read + chunk > size) {
+			chunk = size - read;
 		}
 
-		ext2_read_block(inode.i_block[b], block_buf);
-
-		for (uint32_t i = 0; i < block_size && read < size; i++) {
+		for (uint32_t i = 0; i < chunk; i++) {
 			buffer[read++] = block_buf[i];
 		}
+
+		logical++;
 	}
 
 	return (int)read;
 }
 
 // 写文件，append 为 1 时追加，为 0 时覆盖
-// 返回 0 成功，负值失败
+// 返回 0 成功
+// -1 路径不合法，-2 父目录不存在，-3 父不是目录，-4 目标是目录，-5 无空间，-6 权限不足
 int ext2_write_file(const char *path, const char *data, uint32_t len, int append) {
-	int plen = 0;
-	while (path[plen] != '\0') {
-		plen++;
-	}
-
-	if (plen < 2 || path[0] != '/') {
-		return -1;
-	}
-
-	int slash = -1;
-	for (int i = plen - 1; i >= 1; i--) {
-		if (path[i] == '/') {
-			slash = i;
-			break;
-		}
-	}
-
-	char parent[256];
 	char name[256];
-
-	if (slash == -1) {
-		parent[0] = '/';
-		parent[1] = '\0';
-
-		int k = 0;
-		for (int i = 1; i < plen; i++) {
-			name[k++] = path[i];
-		}
-		name[k] = '\0';
-	} else {
-		for (int i = 0; i < slash; i++) {
-			parent[i] = path[i];
-		}
-		parent[slash] = '\0';
-
-		int k = 0;
-		for (int i = slash + 1; i < plen; i++) {
-			name[k++] = path[i];
-		}
-		name[k] = '\0';
-	}
-
-	if (name[0] == '\0') {
-		return -1;
-	}
-
 	uint32_t parent_ino;
 
-	if (ext2_lookup(parent, &parent_ino) != 0) {
+	if (ext2_lookup_parent(path, &parent_ino, name) != 0) {
 		return -2;
 	}
 
@@ -1636,6 +1737,10 @@ int ext2_write_file(const char *path, const char *data, uint32_t len, int append
 
 	if ((pino.i_mode & 0xF000) != 0x4000) {
 		return -3;
+	}
+
+	if (ext2_check_perm(&pino, PERM_WRITE | PERM_EXEC, 0) != 0) {
+		return -6;
 	}
 
 	uint32_t ino;
@@ -1656,19 +1761,23 @@ int ext2_write_file(const char *path, const char *data, uint32_t len, int append
 		if ((tmp.i_mode & 0xF000) == 0x4000) {
 			return -4;
 		}
+
+		if (ext2_check_perm(&tmp, PERM_WRITE, 0) != 0) {
+			return -6;
+		}
 	}
 
-	static char existing[49152];
-	uint32_t existing_len = 0;
+	static char write_buf[262144];
+	uint32_t final_len = 0;
 
 	if (!is_new && append) {
-		int r = ext2_read_file(path, existing, 49152);
+		int r = ext2_read_file(path, write_buf, 262144);
 
 		if (r < 0) {
 			return r;
 		}
 
-		existing_len = (uint32_t)r;
+		final_len = (uint32_t)r;
 	}
 
 	if (!is_new && !append) {
@@ -1678,20 +1787,15 @@ int ext2_write_file(const char *path, const char *data, uint32_t len, int append
 		ext2_write_inode(ino, &old);
 	}
 
-	uint32_t total_len = len;
-
-	if (!is_new && append) {
-		total_len = existing_len + len;
-	}
-
-	if (total_len > 49152) {
+	if (final_len + len > 262144) {
 		return -5;
 	}
 
-	uint32_t blocks_needed = (total_len + block_size - 1) / block_size;
-	if (blocks_needed > 12) {
-		return -5;
+	for (uint32_t i = 0; i < len; i++) {
+		write_buf[final_len++] = data[i];
 	}
+
+	uint32_t blocks_needed = (final_len + block_size - 1) / block_size;
 
 	struct ext2_inode inode;
 
@@ -1703,35 +1807,18 @@ int ext2_write_file(const char *path, const char *data, uint32_t len, int append
 		}
 
 		inode.i_mode = 0x81A4;
+		inode.i_uid = (uint16_t)current_euid;
+		inode.i_gid = (uint16_t)current_egid;
 		inode.i_links_count = 1;
 	}
 
 	for (uint32_t b = 0; b < blocks_needed; b++) {
-		if (inode.i_block[b] == 0) {
-			uint32_t nb = ext2_alloc_block();
+		uint32_t phys = ext2_alloc_data_block(&inode, b);
 
-			if (nb == 0) {
-				return -5;
-			}
-
-			inode.i_block[b] = nb;
+		if (phys == 0) {
+			return -5;
 		}
-	}
 
-	static char final_buf[49152];
-	uint32_t final_len = 0;
-
-	if (!is_new && append) {
-		for (uint32_t i = 0; i < existing_len; i++) {
-			final_buf[final_len++] = existing[i];
-		}
-	}
-
-	for (uint32_t i = 0; i < len; i++) {
-		final_buf[final_len++] = data[i];
-	}
-
-	for (uint32_t b = 0; b < blocks_needed; b++) {
 		for (uint32_t i = 0; i < block_size; i++) {
 			block_buf[i] = 0;
 		}
@@ -1739,10 +1826,10 @@ int ext2_write_file(const char *path, const char *data, uint32_t len, int append
 		uint32_t start = b * block_size;
 
 		for (uint32_t i = 0; i < block_size && start + i < final_len; i++) {
-			block_buf[i] = final_buf[start + i];
+			block_buf[i] = write_buf[start + i];
 		}
 
-		ext2_write_block(inode.i_block[b], block_buf);
+		ext2_write_block(phys, block_buf);
 	}
 
 	inode.i_size = final_len;
