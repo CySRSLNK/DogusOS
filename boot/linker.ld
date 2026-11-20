@@ -23,4 +23,14 @@ SECTIONS
 		*(COMMON)
 		*(.bss)
 	}
+
+	/* 用户测试代码与栈，ring3 可执行，单独成段便于定位 */
+	. = ALIGN(0x1000);
+	_user_test_start = .;
+
+	.user_test : {
+		*(.user_test)
+	}
+
+	_kernel_end = .;
 }
